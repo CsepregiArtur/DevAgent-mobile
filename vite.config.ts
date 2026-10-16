@@ -6,6 +6,8 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
+    // Served by the DevAgent gateway at https://<host>/mobile
+    base: '/mobile/',
     plugins: [
       react(),
       tailwindcss(),
@@ -13,7 +15,7 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         includeAssets: ['apple-touch-icon.png', 'icon.svg', 'manifest.webmanifest'],
         manifest: {
-          id: '/',
+          id: '/mobile/',
           name: 'DevAgent Mobile',
           short_name: 'DevAgent',
           description: 'Mobile-first PWA control center for dev-agent-platform coding agent.',
@@ -21,23 +23,23 @@ export default defineConfig(() => {
           background_color: '#090d16',
           display: 'standalone',
           orientation: 'portrait-primary',
-          start_url: '/',
-          scope: '/',
+          start_url: '/mobile/',
+          scope: '/mobile/',
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: '/mobile/pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: '/mobile/pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: '/mobile/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -47,8 +49,8 @@ export default defineConfig(() => {
         workbox: {
           // Precache only app shell static assets; NEVER cache dynamic /api/* endpoints
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api/],
+          navigateFallback: '/mobile/index.html',
+          navigateFallbackDenylist: [/^\/mobile\/api/, /^\/mobile\/agent/],
         },
         devOptions: {
           enabled: false,

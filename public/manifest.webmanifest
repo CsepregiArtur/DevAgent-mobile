@@ -1,10 +1,10 @@
 {
-  "id": "/",
+  "id": "/mobile/",
   "name": "DevAgent Mobile",
   "short_name": "DevAgent",
   "description": "Mobile-first PWA control center for dev-agent-platform coding agent.",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "/mobile/",
+  "scope": "/mobile/",
   "display": "standalone",
   "orientation": "portrait-primary",
   "background_color": "#090d16",
@@ -12,19 +12,19 @@
   "categories": ["developer", "utilities", "productivity"],
   "icons": [
     {
-      "src": "/pwa-192x192.png",
+      "src": "/mobile/pwa-192x192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/pwa-512x512.png",
+      "src": "/mobile/pwa-512x512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/pwa-maskable-512x512.png",
+      "src": "/mobile/pwa-maskable-512x512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import type { Diagnostics, AgentInfo } from '../../types/agent';
-import { toggleAgentSimulator } from '../../services/api';
+import { getGatewayBase, getGatewayToken, toggleAgentSimulator } from '../../services/api';
 import { PWAInstallButton } from '../PWAInstallButton';
+import { GatewayConfigCard } from '../GatewayConfigCard';
 import { 
   Server, 
   Laptop, 
@@ -34,9 +35,15 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [copiedSnippet, setCopiedSnippet] = useState(false);
   const [isTogglingSim, setIsTogglingSim] = useState(false);
 
-  const curlSnippet = `curl -X POST "${window.location.origin}/api/agent/heartbeat" \\
-  -H "Content-Type: application/json" \\
-  -d '{"agentId":"macbook-pro","hostname":"$(hostname)","status":"online","workspace":"~/dev/mobile-agent-platform"}'`;
+  const gatewayBase = getGatewayBase() || window.location.origin;
+  const curlSnippet = `# pe MacBook (connects outbound, no inbound ports):
+python3 devagent_agent.py --env-file ~/.devagent/agent.env --check
+
+# heartbeat manual (fara executie de cod):
+curl -X POST "${gatewayBase}/api/agent/heartbeat" \
+  -H "Authorization: Bearer ${getGatewayToken() || '<DEVAGENT_TOKEN>'}" \
+  -H "Content-Type: application/json" \
+  -d '{"agentId":"macbook-pro","hostname":"$(hostname)","status":"online","workspace":"~/dev"}'`;
 
   const handleCopySnippet = () => {
     navigator.clipboard.writeText(curlSnippet);
@@ -63,6 +70,9 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
         <h2 className="text-base font-semibold text-white">Diagnostics & Gateway</h2>
         <p className="text-xs text-zinc-400">System infrastructure and agent connectivity</p>
       </div>
+
+      {/* 0. Gateway URL + shared token (needed by the iOS app) */}
+      <GatewayConfigCard onSaved={onRefresh} />
 
       {/* 1. Agent Connectivity */}
       <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-sm space-y-3">

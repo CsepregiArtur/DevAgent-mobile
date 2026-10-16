@@ -4,7 +4,8 @@ import {
   fetchAgentStatus, 
   fetchTasks, 
   fetchDiagnostics, 
-  fetchWorkspaces 
+  fetchWorkspaces,
+  sseUrl,
 } from './services/api';
 import { Header } from './components/Header';
 import { BottomNav, type TabType } from './components/BottomNav';
@@ -81,7 +82,7 @@ export default function App() {
     function connectGlobalSSE() {
       if (isDisposed) return;
       try {
-        eventSource = new EventSource('/api/events');
+        eventSource = new EventSource(sseUrl('/api/events'));
 
         eventSource.addEventListener('message', (e) => {
           try {

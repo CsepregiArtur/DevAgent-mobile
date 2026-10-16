@@ -8,8 +8,59 @@ import type {
   TaskEvent,
 } from '../types/agent';
 
-// Dynamic API base URL: empty string for same-origin (works on phone, desktop, tunnels, and AI Studio proxy)
-const API_BASE = '';
+// ---------------------------------------------------------------------------
+// Gateway configuration
+//
+// The PWA is served from the gateway itself (https://<host>/mobile), so the
+// default base URL is derived from Vite's BASE_URL. Inside the native iOS shell
+// (Capacitor) the origin is `capacitor://localhost`, therefore both the base URL
+// and the shared token are configurable at runtime and stored on the device.
+// ---------------------------------------------------------------------------
+const STORAGE_BASE_URL = 'devagent.baseUrl';
+const STORAGE_TOKEN = 'devagent.token';
+
+export const DEFAULT_GATEWAY_URL = 'https://deepseek-api.cs-hub.xyz/mobile';
+
+export function getGatewayBase(): string {
+  const stored = localStorage.getItem(STORAGE_BASE_URL);
+  if (stored) return stored.replace(/\/+$/, '');
+  const fromBuild = import.meta.env.BASE_URL || '/';
+  return fromBuild === '/' ? '' : fromBuild.replace(/\/+$/, '');
+}
+
+export function getGatewayToken(): string {
+  return localStorage.getItem(STORAGE_TOKEN) || '';
+}
+
+export function saveGatewayConfig(baseUrl: string, token: string): void {
+  if (baseUrl.trim()) {
+    localStorage.setItem(STORAGE_BASE_URL, baseUrl.trim().replace(/\/+$/, ''));
+  }
+  if (token.trim()) {
+    localStorage.setItem(STORAGE_TOKEN, token.trim());
+  }
+}
+
+export function clearGatewayConfig(): void {
+  localStorage.removeItem(STORAGE_BASE_URL);
+  localStorage.removeItem(STORAGE_TOKEN);
+}
+
+export function apiUrl(path: string): string {
+  return `${getGatewayBase()}${path}`;
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getGatewayToken();
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra;
+}
+
+/** EventSource cannot send headers, so the token travels in the query string. */
+export function sseUrl(path: string): string {
+  const token = getGatewayToken();
+  const separator = path.includes('?') ? '&' : '?';
+  return `${apiUrl(path)}${token ? `${separator}token=${encodeURIComponent(token)}` : ''}`;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -55,8 +106,8 @@ export async function fetchAgentStatus(): Promise<{
   secondsSinceHeartbeat: number;
   isSimulated: boolean;
 }> {
-  const res = await fetch(`${API_BASE}/api/agent/status`, {
-    headers: { Accept: 'application/json' },
+  const res = await fetch(apiUrl('/api/agent/status'), {
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
@@ -73,14 +124,14 @@ export async function fetchTasks(params?: {
   if (params?.limit) query.set('limit', String(params.limit));
   if (params?.offset) query.set('offset', String(params.offset));
 
-  const url = `${API_BASE}/api/tasks${query.toString() ? `?${query.toString()}` : ''}`;
-  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const url = apiUrl(`/api/tasks${query.toString() ? `?${query.toString()}` : ''}`);
+  const res = await fetch(url, { headers: authHeaders({ Accept: 'application/json' }) });
   return handleResponse(res);
 }
 
 export async function fetchTask(id: string): Promise<{ task: Task }> {
-  const res = await fetch(`${API_BASE}/api/tasks/${id}`, {
-    headers: { Accept: 'application/json' },
+  const res = await fetch(apiUrl(`/api/tasks/${id}`), {
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
@@ -93,12 +144,12 @@ export async function createTask(payload: CreateTaskPayload): Promise<{
   const timeoutId = setTimeout(() => controller.abort(), 15000);
 
   try {
-    const res = await fetch(`${API_BASE}/api/tasks`, {
+    const res = await fetch(apiUrl('/api/tasks'), {
       method: 'POST',
-      headers: {
+      headers: authHeaders({
         'Content-Type': 'application/json',
         Accept: 'application/json',
-      },
+      }),
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
@@ -114,17 +165,17 @@ export async function createTask(payload: CreateTaskPayload): Promise<{
 }
 
 export async function cancelTask(id: string): Promise<{ task: Task; message: string }> {
-  const res = await fetch(`${API_BASE}/api/tasks/${id}/cancel`, {
+  const res = await fetch(apiUrl(`/api/tasks/${id}/cancel`), {
     method: 'POST',
-    headers: { Accept: 'application/json' },
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
 
 export async function retryTask(id: string): Promise<{ task: Task; message: string }> {
-  const res = await fetch(`${API_BASE}/api/tasks/${id}/retry`, {
+  const res = await fetch(apiUrl(`/api/tasks/${id}/retry`), {
     method: 'POST',
-    headers: { Accept: 'application/json' },
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
@@ -133,20 +184,20 @@ export async function respondToApproval(
   taskId: string,
   payload: ApprovalDecisionPayload
 ): Promise<{ task: Task; approval: TaskApproval; message: string }> {
-  const res = await fetch(`${API_BASE}/api/tasks/${taskId}/approval`, {
+  const res = await fetch(apiUrl(`/api/tasks/${taskId}/approval`), {
     method: 'POST',
-    headers: {
+    headers: authHeaders({
       'Content-Type': 'application/json',
       Accept: 'application/json',
-    },
+    }),
     body: JSON.stringify(payload),
   });
   return handleResponse(res);
 }
 
 export async function fetchDiagnostics(): Promise<Diagnostics> {
-  const res = await fetch(`${API_BASE}/api/diagnostics`, {
-    headers: { Accept: 'application/json' },
+  const res = await fetch(apiUrl('/api/diagnostics'), {
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
@@ -155,8 +206,8 @@ export async function fetchWorkspaces(): Promise<{
   workspaces: string[];
   defaultWorkspace: string;
 }> {
-  const res = await fetch(`${API_BASE}/api/workspaces`, {
-    headers: { Accept: 'application/json' },
+  const res = await fetch(apiUrl('/api/workspaces'), {
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }
@@ -164,12 +215,12 @@ export async function fetchWorkspaces(): Promise<{
 export async function toggleAgentSimulator(
   enabled?: boolean
 ): Promise<{ simulatorActive: boolean; agentStatus: string }> {
-  const res = await fetch(`${API_BASE}/api/agent/simulate-toggle`, {
+  const res = await fetch(apiUrl('/api/agent/simulate-toggle'), {
     method: 'POST',
-    headers: {
+    headers: authHeaders({
       'Content-Type': 'application/json',
       Accept: 'application/json',
-    },
+    }),
     body: JSON.stringify({ enabled }),
   });
   return handleResponse(res);
@@ -195,7 +246,7 @@ export function subscribeToTaskEvents(
     callbacks.onStatusChange?.('reconnecting');
 
     try {
-      eventSource = new EventSource(`${API_BASE}/api/tasks/${taskId}/events`);
+      eventSource = new EventSource(sseUrl(`/api/tasks/${taskId}/events`));
 
       eventSource.onopen = () => {
         callbacks.onStatusChange?.('connected');

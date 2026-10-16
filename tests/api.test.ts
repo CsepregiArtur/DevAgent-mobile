@@ -10,8 +10,9 @@ test('PWA manifest exists and meets installability standards', () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   assert.equal(manifest.display, 'standalone');
   assert.ok(manifest.short_name.length <= 12, 'short_name must be <= 12 chars');
-  assert.equal(manifest.start_url, '/');
-  assert.equal(manifest.scope, '/');
+  // The PWA is served by the DevAgent gateway under /mobile
+  assert.equal(manifest.start_url, '/mobile/');
+  assert.equal(manifest.scope, '/mobile/');
   assert.ok(manifest.icons && manifest.icons.length >= 3);
 
   // Check required resolutions
