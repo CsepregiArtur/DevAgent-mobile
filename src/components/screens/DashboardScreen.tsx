@@ -19,6 +19,7 @@ interface DashboardScreenProps {
   agentInfo: AgentInfo | null;
   agentConnected: boolean;
   agents: AgentInfo[];
+  gatewayReachable?: boolean;
   tasks: Task[];
   diagnostics: Diagnostics | null;
   onNavigateToTask: (taskId: string) => void;
@@ -31,6 +32,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   agentInfo,
   agentConnected,
   agents,
+  gatewayReachable = true,
   tasks,
   diagnostics,
   onNavigateToTask,
@@ -47,7 +49,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   return (
     <div className="space-y-4 pb-6">
       {/* 1. Worker fleet: one row per machine (MacBook, second laptop, Linux box...) */}
-      <AgentsCard agents={agents} compact queuedCount={queuedTasks.length} />
+      <AgentsCard agents={agents} compact queuedCount={queuedTasks.length} gatewayReachable={gatewayReachable} />
 
       {/* 2. Urgent Attention: Awaiting Approval Banner */}
       {awaitingTask && (

@@ -28,6 +28,7 @@ const EMPTY_FLEET: FleetStatus = {
   agents: [],
   onlineAgents: 0,
   totalAgents: 0,
+  gatewayOnline: false,
 };
 
 export default function App() {
@@ -37,6 +38,7 @@ export default function App() {
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [agentConnected, setAgentConnected] = useState<boolean>(true);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [gatewayReachable, setGatewayReachable] = useState<boolean>(false);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>(['~/dev/mobile-agent-platform']);
@@ -64,6 +66,7 @@ export default function App() {
       setAgentConnected(agentRes.connected);
       if (agentRes.info) setAgentInfo(agentRes.info);
       setAgents(agentRes.agents || []);
+      setGatewayReachable(agentRes.gatewayOnline === true);
       setTasks(tasksRes.tasks || []);
       if (diagRes) setDiagnostics(diagRes);
       if (wsRes.workspaces) setWorkspaces(wsRes.workspaces);
@@ -119,6 +122,7 @@ export default function App() {
             }
             if (Array.isArray(data.agents)) {
               setAgents(data.agents);
+              setGatewayReachable(true);
               setAgentConnected(data.agents.some((agent: AgentInfo) => agent.online));
             } else {
               setAgentConnected(data.agentInfo?.status !== 'offline');
@@ -228,6 +232,7 @@ export default function App() {
                 agentInfo={agentInfo}
                 agentConnected={agentConnected}
                 agents={agents}
+                gatewayReachable={gatewayReachable}
                 tasks={tasks}
                 diagnostics={diagnostics}
                 onNavigateToTask={handleNavigateToTask}
@@ -270,6 +275,7 @@ export default function App() {
                 diagnostics={diagnostics}
                 agentInfo={agentInfo}
                 agents={agents}
+                gatewayReachable={gatewayReachable}
                 onRefresh={() => loadAllData(false)}
               />
             )}

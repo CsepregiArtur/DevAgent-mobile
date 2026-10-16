@@ -35,6 +35,8 @@ export interface FleetStatus {
   agents?: AgentInfo[];
   onlineAgents?: number;
   totalAgents?: number;
+  /** false when the app could not authenticate against the gateway at all */
+  gatewayOnline?: boolean;
 }
 
 export type TaskStatus = 

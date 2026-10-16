@@ -26,6 +26,7 @@ interface SettingsScreenProps {
   diagnostics: Diagnostics | null;
   agentInfo: AgentInfo | null;
   agents: AgentInfo[];
+  gatewayReachable?: boolean;
   onRefresh: () => void;
 }
 
@@ -33,6 +34,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   diagnostics,
   agentInfo,
   agents,
+  gatewayReachable = true,
   onRefresh,
 }) => {
   const [copiedSnippet, setCopiedSnippet] = useState(false);
@@ -78,7 +80,7 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
       <GatewayConfigCard onSaved={onRefresh} />
 
       {/* 1. The worker fleet (every machine that can execute tasks) */}
-      <AgentsCard agents={agents} onChanged={onRefresh} />
+      <AgentsCard agents={agents} onChanged={onRefresh} gatewayReachable={gatewayReachable} />
 
       {/* 1b. Primary agent details */}
       <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-sm space-y-3">

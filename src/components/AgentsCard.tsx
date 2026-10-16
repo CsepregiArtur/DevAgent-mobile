@@ -19,6 +19,8 @@ interface AgentsCardProps {
   /** compact variant is used on the dashboard, the full one in Settings */
   compact?: boolean;
   queuedCount?: number;
+  /** false when the API could not be reached (missing/incorrect token) */
+  gatewayReachable?: boolean;
   onChanged?: () => void;
 }
 
@@ -48,6 +50,7 @@ export const AgentsCard: React.FC<AgentsCardProps> = ({
   agents,
   compact = false,
   queuedCount = 0,
+  gatewayReachable = true,
   onChanged,
 }) => {
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -214,20 +217,41 @@ export const AgentsCard: React.FC<AgentsCardProps> = ({
           </div>
           <div className="bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/40">
             <span className="text-zinc-500 block">Gateway</span>
-            <span className="text-emerald-400 font-semibold block">Active</span>
+            <span
+              className={`font-semibold block ${
+                gatewayReachable ? 'text-emerald-400' : 'text-rose-400'
+              }`}
+            >
+              {gatewayReachable ? 'Active' : 'No access'}
+            </span>
           </div>
         </div>
       )}
 
       {visible.length === 0 && (
         <div className="mt-3 p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/60 space-y-1.5">
-          <p className="text-[11px] text-zinc-300 flex items-center gap-1.5">
-            <ServerCog className="w-3.5 h-3.5 text-zinc-500" />
-            Start a worker to execute tasks:
-          </p>
-          <pre className="text-[10px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap">
+          {gatewayReachable ? (
+            <>
+              <p className="text-[11px] text-zinc-300 flex items-center gap-1.5">
+                <ServerCog className="w-3.5 h-3.5 text-zinc-500" />
+                Start a worker to execute tasks:
+              </p>
+              <pre className="text-[10px] font-mono text-zinc-400 overflow-x-auto whitespace-pre-wrap">
 {`python3 agent/devagent_agent.py --env-file ~/.devagent/agent.env`}
-          </pre>
+              </pre>
+            </>
+          ) : (
+            <>
+              <p className="text-[11px] text-rose-300 flex items-center gap-1.5">
+                <WifiOff className="w-3.5 h-3.5" />
+                The app cannot reach the gateway.
+              </p>
+              <p className="text-[10px] text-zinc-400">
+                Add the gateway URL and the shared token in Settings → Gateway connection
+                (or open the app once with <span className="font-mono">?token=…</span>).
+              </p>
+            </>
+          )}
           <p className="text-[10px] text-zinc-500 flex items-center gap-1.5">
             <Layers className="w-3 h-3" />
             Each machine gets its own DEVAGENT_AGENT_ID and can be targeted per task.

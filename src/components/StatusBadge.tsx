@@ -114,7 +114,7 @@ export const AgentStatusBadge: React.FC<AgentStatusBadgeProps> = ({ status, isSi
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-800 text-zinc-400 border border-zinc-700">
           <WifiOff className="w-3.5 h-3.5" />
-          <span>MacBook Offline</span>
+          <span>No agent online</span>
         </span>
       );
   }
