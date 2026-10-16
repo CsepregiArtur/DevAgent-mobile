@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Pornește agentul DevAgent la login pe MacBook.
+
+  Instalare:
+    cp com.devagent.agent.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.devagent.agent.plist
+  Loguri:
+    tail -f ~/.devagent/agent.out.log ~/.devagent/agent.err.log
+  Oprire:
+    launchctl unload -w ~/Library/LaunchAgents/com.devagent.agent.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devagent.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/artur/devagent/devagent_agent.py</string>
+        <string>--env-file</string>
+        <string>/Users/artur/.devagent/agent.env</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/artur/devagent</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/artur/.devagent/agent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/artur/.devagent/agent.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -1,0 +1,27 @@
+[Unit]
+Description=DevAgent Gateway (task queue, approvals, agent WebSocket) - /mobile
+Documentation=file:///opt/deepseek-proxy/devagent/README.md
+After=network-online.target redis-server.service deepseek-proxy.service
+Wants=network-online.target redis-server.service
+
+[Service]
+Type=exec
+User=devagent
+Group=devagent
+WorkingDirectory=/opt/deepseek-proxy/devagent/gateway
+EnvironmentFile=/etc/deepseek-devagent.env
+ExecStart=/opt/deepseek-proxy/devagent/gateway/.venv/bin/uvicorn app.server:create_app \
+    --factory --host 127.0.0.1 --port 8082 --no-access-log
+Restart=on-failure
+RestartSec=3
+StateDirectory=devagent
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/devagent
+ReadOnlyPaths=/opt/deepseek-proxy/mobile/dist
+
+[Install]
+WantedBy=multi-user.target
