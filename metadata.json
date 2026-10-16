@@ -1,0 +1,6 @@
+{
+  "name": "DevAgent Mobile",
+  "description": "Mobile-first PWA control center for dev-agent-platform coding agent.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
