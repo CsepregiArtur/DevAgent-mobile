@@ -11,6 +11,30 @@ export interface AgentInfo {
   activeTaskId: string | null;
   batteryLevel?: number;
   isSimulated?: boolean;
+  /** true when the gateway holds a live WebSocket for this agent */
+  online?: boolean;
+  /** seconds since the last heartbeat (null when never seen) */
+  secondsSinceHeartbeat?: number | null;
+  capabilities?: string[];
+}
+
+/** Fleet view: the MacBook is not the only possible worker. */
+export interface AgentsResponse {
+  agents: AgentInfo[];
+  onlineAgents: number;
+  totalAgents: number;
+  primaryAgentId?: string | null;
+}
+
+export interface FleetStatus {
+  connected: boolean;
+  status: AgentStatus;
+  info: AgentInfo | null;
+  secondsSinceHeartbeat: number | null;
+  isSimulated: boolean;
+  agents?: AgentInfo[];
+  onlineAgents?: number;
+  totalAgents?: number;
 }
 
 export type TaskStatus = 
@@ -103,6 +127,10 @@ export interface CreateTaskPayload {
   workspace?: string;
   mode?: TaskMode;
   model?: string;
+  /** pin the task to one agent (empty/undefined = first capable idle agent) */
+  agentId?: string;
+  /** only agents advertising these capabilities may pick the task up */
+  requiredCapabilities?: string[];
 }
 
 export interface ApprovalDecisionPayload {

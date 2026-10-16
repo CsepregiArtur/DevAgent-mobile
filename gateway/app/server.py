@@ -74,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await db.connect()
         await bus.start()
+        # A restart kills every socket: reconcile before serving traffic so no agent
+        # stays "online" and no task stays "running" without a worker.
+        await service.reconcile_on_startup()
         await scheduler.start()
         logger.info(
             "devagent gateway %s ready (root=%s, bus=%s, db=%s)",

@@ -76,26 +76,68 @@ class TaskService:
     # serialisation helpers
     # ------------------------------------------------------------------
     async def agent_status_snapshot(self) -> dict[str, Any]:
-        agent = await self.db.primary_agent()
-        last_seen = parse_ts(agent["last_heartbeat"]) if agent else None
-        seconds = None
-        if last_seen is not None:
-            from datetime import datetime, timezone
+        agents = await self.db.list_agents()
+        ordered = self._order_agents(agents)
+        primary = ordered[0] if ordered else None
+        live = [a for a in ordered if self._is_live(a)]
 
-            seconds = max(0, int((datetime.now(timezone.utc) - last_seen).total_seconds()))
-        status = (agent or {}).get("status") or "offline"
-        if agent and status != "offline" and not self.hub.is_online(agent["agent_id"]):
-            # Socket gone but heartbeat still fresh -> reconnecting window.
+        status = (primary or {}).get("status") or "offline"
+        if primary is not None and status != "offline" and not self._is_live(primary):
+            # Row says online but no socket is attached -> reconnecting window.
             status = "reconnecting"
         simulated = await self.simulator_enabled()
+
+        def row(agent: dict[str, Any]) -> dict[str, Any]:
+            payload = agent_to_dict(agent) or {}
+            payload["online"] = self._is_live(agent)
+            payload["secondsSinceHeartbeat"] = self._heartbeat_age_seconds(agent)
+            return payload
+
         return {
-            "connected": status not in {"offline"},
-            "status": status,
-            "info": agent_to_dict(agent),
-            "secondsSinceHeartbeat": seconds,
+            "connected": any(self._is_live(a) for a in ordered),
+            "status": status if live else ("online" if any(self._is_live(a) for a in ordered) else "offline"),
+            "info": agent_to_dict(primary),
+            "secondsSinceHeartbeat": self._heartbeat_age_seconds(primary) if primary else None,
             "isSimulated": simulated,
             "gatewayOnline": True,
+            "agents": [row(agent) for agent in ordered],
+            "onlineAgents": len(live),
+            "totalAgents": len(ordered),
         }
+
+    # -- fleet helpers ---------------------------------------------------
+    def _is_live(self, agent: dict[str, Any]) -> bool:
+        return self.hub.is_online(agent["agent_id"])
+
+    def _heartbeat_age_seconds(self, agent: dict[str, Any] | None) -> int | None:
+        from datetime import datetime, timezone
+
+        if not agent:
+            return None
+        parsed = parse_ts(agent.get("last_heartbeat"))
+        if parsed is None:
+            return None
+        return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+    def _order_agents(self, agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Live sockets first, then most recently seen (a fleet, not one laptop)."""
+        live = [a for a in agents if self._is_live(a)]
+        idle = [a for a in agents if not self._is_live(a)]
+        key = lambda agent: (agent.get("last_heartbeat") or "")  # noqa: E731
+        live.sort(key=key, reverse=True)
+        idle.sort(key=key, reverse=True)
+        return live + idle
+
+    @staticmethod
+    def _agent_can_run(agent: dict[str, Any], task: dict[str, Any]) -> bool:
+        target = task.get("target_agent_id")
+        if target and target != agent["agent_id"]:
+            return False
+        required = {c for c in (task.get("required_capabilities_json") or []) if c}
+        if not required:
+            return True
+        available = {c for c in (agent.get("capabilities_json") or []) if c}
+        return required.issubset(available)
 
     async def publish_agent_status(self) -> None:
         await self.bus.publish({"type": "agent_status", "agent": await self.agent_status_snapshot()})
@@ -159,8 +201,20 @@ class TaskService:
         gates = list(payload.gates) if payload.gates else list(DEFAULT_GATES.get(payload.mode, ["diff"]))
         gates = self._normalize_gates(gates)
 
-        agent = await self.db.primary_agent()
-        workspace = payload.workspace or (agent or {}).get("workspace") or self.settings.default_workspace
+        target_agent = None
+        if payload.agent_id:
+            target_agent = await self.db.get_agent(payload.agent_id)
+            if target_agent is None:
+                raise ServiceError(f"Unknown agent: {payload.agent_id}", 404)
+
+        ordered = self._order_agents(await self.db.list_agents())
+        primary = ordered[0] if ordered else None
+        workspace_agent = target_agent or primary
+        workspace = (
+            payload.workspace
+            or (workspace_agent or {}).get("workspace")
+            or self.settings.default_workspace
+        )
         model = payload.model or self.settings.default_model
 
         task = await self.db.create_task(
@@ -170,19 +224,34 @@ class TaskService:
             model=model,
             gates=gates,
             idempotency_key=payload.idempotency_key,
+            target_agent_id=target_agent["agent_id"] if target_agent else None,
+            required_capabilities=payload.required_capabilities,
         )
-        status = await self.agent_status_snapshot()
-        online = status["status"] in {"online", "busy", "reconnecting"}
-        message = (
-            "Task submitted and placed in the agent execution queue"
-            if online
-            else "Task queued. Execution starts automatically once the MacBook agent reconnects."
+        online = (
+            self._is_live(target_agent)
+            if target_agent is not None
+            else any(self._is_live(agent) for agent in ordered)
         )
+        if online:
+            message = "Task submitted and placed in the agent execution queue"
+        elif target_agent is not None:
+            message = (
+                f"Task queued for agent '{target_agent['agent_id']}'. Execution starts when it "
+                "reconnects."
+            )
+        else:
+            message = "Task queued. Execution starts automatically once an agent reconnects."
         await self._emit(
             task["id"],
             type="status_change",
             message=message,
-            details={"status": "queued", "gates": gates, "agentOnline": online},
+            details={
+                "status": "queued",
+                "gates": gates,
+                "agentOnline": online,
+                "targetAgentId": (target_agent or {}).get("agent_id"),
+                "requiredCapabilities": payload.required_capabilities or [],
+            },
         )
         snapshot = await self.task_snapshot(task["id"])
         assert snapshot is not None
@@ -190,7 +259,7 @@ class TaskService:
             # Trigger an immediate dispatch attempt so an idle agent picks the task
             # up in ~milliseconds instead of waiting for the next scheduler tick.
             await self.dispatch_pending()
-        return snapshot, ("Task accepted and queued" if online else "Task queued (MacBook agent offline)")
+        return snapshot, ("Task accepted and queued" if online else message)
 
     @staticmethod
     def _normalize_gates(gates: Iterable[str]) -> list[str]:
@@ -341,12 +410,21 @@ class TaskService:
                 )
         await self.publish_agent_status()
 
-    async def dispatch_task(self, task_id: str, agent_id: str) -> bool:
-        """Hand a queued task to an agent (fresh start or resume from checkpoint)."""
+    async def dispatch_task(self, task_id: str, agent_id: str, *, force: bool = False) -> bool:
+        """Hand a queued task to an agent (fresh start or resume from checkpoint).
+
+        ``force`` skips the target/capability filter and is only used when the task
+        is already bound to this agent (resuming after an interruption).
+        """
         task = await self.db.get_task(task_id)
         if task is None or task["status"] != "queued":
             return False
         if not self.hub.is_online(agent_id):
+            return False
+        agent = await self.db.get_agent(agent_id)
+        if agent is None:
+            return False
+        if not force and not self._agent_can_run(agent, task):
             return False
 
         checkpoint = await self.db.latest_checkpoint(task_id)
@@ -401,9 +479,9 @@ class TaskService:
             task_id,
             type="status_change",
             message=(
-                f"Resumed on {agent_id} from checkpoint '{checkpoint['name']}'"
+                f"Resumed on {agent.get('hostname') or agent_id} from checkpoint '{checkpoint['name']}'"
                 if resuming and checkpoint
-                else f"Task acquired by agent {agent_id}"
+                else f"Task acquired by agent {agent.get('hostname') or agent_id}"
             ),
             details={
                 "status": "running",
@@ -422,7 +500,7 @@ class TaskService:
         for task in await self.db.tasks_pending_agent(agent_id):
             if task["status"] in {"running", "awaiting_approval"}:
                 await self.db.update_task(task["id"], status="queued", agent_id=agent_id)
-            if await self.dispatch_task(task["id"], agent_id):
+            if await self.dispatch_task(task["id"], agent_id, force=True):
                 resumed.append(task["id"])
         return resumed
 
@@ -804,15 +882,64 @@ class TaskService:
         return idle
 
     async def dispatch_pending(self) -> int:
-        """FIFO dispatch of queued tasks to idle, connected agents."""
+        """FIFO dispatch of queued tasks to idle, connected agents.
+
+        Each task is matched against every idle agent: an explicit target agent
+        wins, tasks with ``requiredCapabilities`` only go to agents that advertise
+        them, and the oldest task is preferred.
+        """
         dispatched = 0
+        candidates = await self.db.queued_candidates()
+        if not candidates:
+            return 0
         for agent in await self.idle_online_agents():
-            task = await self.db.next_queued_task()
-            if task is None:
+            for task in list(candidates):
+                if not self._agent_can_run(agent, task):
+                    continue
+                if await self.dispatch_task(task["id"], agent["agent_id"]):
+                    dispatched += 1
+                    candidates.remove(task)
                 break
-            if await self.dispatch_task(task["id"], agent["agent_id"]):
-                dispatched += 1
+            if not candidates:
+                break
         return dispatched
+
+    async def remove_agent(self, agent_id: str) -> None:
+        """Forget a decommissioned agent (its tasks stay in the history)."""
+        agent = await self.db.get_agent(agent_id)
+        if agent is None:
+            raise ServiceError("Agent not found", 404)
+        if self.hub.is_online(agent_id):
+            raise ServiceError("Agent is connected; disconnect it first", 409)
+        await self.db.delete_agent(agent_id)
+        await self.publish_agent_status()
+
+    async def reconcile_on_startup(self) -> None:
+        """A gateway restart kills every socket: nothing may stay 'online'.
+
+        Tasks that were ``running`` are put back in the queue with
+        ``interrupted_at`` so the next agent connection resumes them from their
+        last checkpoint; pending approvals stay valid.
+        """
+        await self.db.mark_all_agents_offline()
+        now = utcnow()
+        for status in ("running", "awaiting_approval"):
+            tasks, _ = await self.db.list_tasks(status=status, limit=500)
+            for task in tasks:
+                if status == "running":
+                    await self.db.update_task(task["id"], status="queued", interrupted_at=now)
+                    await self._emit(
+                        task["id"],
+                        type="status_change",
+                        message=(
+                            "Gateway restarted while this task was running. It is back in the "
+                            "queue and resumes from its last checkpoint."
+                        ),
+                        details={"status": "queued", "interruptedAt": now, "reason": "gateway-restart"},
+                    )
+                else:
+                    await self.db.update_task(task["id"], interrupted_at=now)
+        await self.publish_agent_status()
 
     async def simulator_enabled(self) -> bool:
         return await self.db.get_flag("simulator_active", self.settings.simulator_enabled)
@@ -839,18 +966,31 @@ class TaskService:
     # diagnostics
     # ------------------------------------------------------------------
     async def workspaces(self) -> dict[str, Any]:
-        agent = await self.db.primary_agent()
+        ordered = self._order_agents(await self.db.list_agents())
         discovered: list[str] = []
-        if agent and agent.get("workspace"):
-            discovered.append(agent["workspace"])
+        for agent in ordered:
+            if agent.get("workspace"):
+                discovered.append(agent["workspace"])
         discovered.extend(list(self.settings.workspaces))
         seen: list[str] = []
         for workspace in discovered:
             if workspace not in seen:
                 seen.append(workspace)
+        primary = ordered[0] if ordered else None
         return {
             "workspaces": seen,
-            "defaultWorkspace": (agent or {}).get("workspace") or self.settings.default_workspace,
+            "defaultWorkspace": (primary or {}).get("workspace")
+            or self.settings.default_workspace,
+            "agents": [
+                {
+                    "agentId": agent["agent_id"],
+                    "hostname": agent.get("hostname"),
+                    "workspace": agent.get("workspace"),
+                    "online": self._is_live(agent),
+                    "status": agent.get("status"),
+                }
+                for agent in ordered
+            ],
         }
 
     async def diagnostics(self) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import type { Diagnostics, AgentInfo } from '../../types/agent';
 import { getGatewayBase, getGatewayToken, toggleAgentSimulator } from '../../services/api';
 import { PWAInstallButton } from '../PWAInstallButton';
 import { GatewayConfigCard } from '../GatewayConfigCard';
+import { AgentsCard } from '../AgentsCard';
 import { 
   Server, 
   Laptop, 
@@ -24,12 +25,14 @@ import {
 interface SettingsScreenProps {
   diagnostics: Diagnostics | null;
   agentInfo: AgentInfo | null;
+  agents: AgentInfo[];
   onRefresh: () => void;
 }
 
 export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   diagnostics,
   agentInfo,
+  agents,
   onRefresh,
 }) => {
   const [copiedSnippet, setCopiedSnippet] = useState(false);
@@ -74,7 +77,10 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
       {/* 0. Gateway URL + shared token (needed by the iOS app) */}
       <GatewayConfigCard onSaved={onRefresh} />
 
-      {/* 1. Agent Connectivity */}
+      {/* 1. The worker fleet (every machine that can execute tasks) */}
+      <AgentsCard agents={agents} onChanged={onRefresh} />
+
+      {/* 1b. Primary agent details */}
       <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -83,10 +89,10 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
             </div>
             <div>
               <h3 className="text-xs font-semibold uppercase tracking-wider text-white">
-                MacBook Agent
+                Primary agent
               </h3>
               <p className="text-[11px] text-zinc-400 font-mono">
-                {agentInfo?.hostname || 'Unknown host'}
+                {agentInfo?.hostname || 'no agent has checked in yet'}
               </p>
             </div>
           </div>
@@ -105,7 +111,7 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
           <div className="p-2.5 rounded-xl bg-zinc-950/60 border border-zinc-800/60">
             <span className="text-[10px] text-zinc-500 block uppercase">OS / Architecture</span>
             <span className="text-zinc-200 truncate block mt-0.5">
-              {agentInfo?.os || 'macOS 15.1 arm64'}
+              {agentInfo?.os || '—'}
             </span>
           </div>
 
@@ -121,7 +127,7 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
           <div className="p-2.5 rounded-xl bg-zinc-950/60 border border-zinc-800/60 col-span-2">
             <span className="text-[10px] text-zinc-500 block uppercase">Active Workspace</span>
             <span className="text-zinc-200 truncate block mt-0.5">
-              {agentInfo?.workspace || '~/dev/mobile-agent-platform'}
+              {agentInfo?.workspace || '—'}
             </span>
           </div>
         </div>

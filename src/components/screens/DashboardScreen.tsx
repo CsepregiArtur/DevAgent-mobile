@@ -1,10 +1,9 @@
 import React from 'react';
 import type { AgentInfo, Diagnostics, Task } from '../../types/agent';
-import { TaskStatusBadge, AgentStatusBadge } from '../StatusBadge';
+import { TaskStatusBadge } from '../StatusBadge';
+import { AgentsCard } from '../AgentsCard';
 import { PWAInstallButton } from '../PWAInstallButton';
 import { 
-  Laptop, 
-  FolderGit2, 
   Clock, 
   CheckCircle2, 
   AlertTriangle, 
@@ -19,6 +18,7 @@ import {
 interface DashboardScreenProps {
   agentInfo: AgentInfo | null;
   agentConnected: boolean;
+  agents: AgentInfo[];
   tasks: Task[];
   diagnostics: Diagnostics | null;
   onNavigateToTask: (taskId: string) => void;
@@ -30,6 +30,7 @@ interface DashboardScreenProps {
 export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   agentInfo,
   agentConnected,
+  agents,
   tasks,
   diagnostics,
   onNavigateToTask,
@@ -45,55 +46,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 
   return (
     <div className="space-y-4 pb-6">
-      {/* 1. Agent Status Card */}
-      <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-sm relative overflow-hidden">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className={`p-2.5 rounded-xl border ${
-              agentConnected 
-                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' 
-                : 'bg-zinc-800 border-zinc-700 text-zinc-500'
-            }`}>
-              <Laptop className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold text-white">
-                  {agentInfo?.hostname || 'MacBook Agent'}
-                </h2>
-              </div>
-              <p className="text-xs text-zinc-400 font-mono flex items-center gap-1 mt-0.5">
-                <FolderGit2 className="w-3.5 h-3.5 text-zinc-500" />
-                <span className="truncate max-w-[210px] sm:max-w-xs">
-                  {agentInfo?.workspace || '~/dev/mobile-agent-platform'}
-                </span>
-              </p>
-            </div>
-          </div>
-          <AgentStatusBadge 
-            status={agentInfo?.status || (agentConnected ? 'online' : 'offline')} 
-            isSimulated={agentInfo?.isSimulated}
-          />
-        </div>
-
-        {/* Diagnostic Meta Bar */}
-        <div className="mt-3 pt-3 border-t border-zinc-800/80 grid grid-cols-3 gap-2 text-center text-[11px]">
-          <div className="bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/40">
-            <span className="text-zinc-500 block">Agent OS</span>
-            <span className="text-zinc-300 font-mono font-medium truncate block">macOS arm64</span>
-          </div>
-          <div className="bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/40">
-            <span className="text-zinc-500 block">Queue</span>
-            <span className="text-zinc-300 font-semibold block">
-              {queuedTasks.length} {queuedTasks.length === 1 ? 'task' : 'tasks'}
-            </span>
-          </div>
-          <div className="bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/40">
-            <span className="text-zinc-500 block">Gateway</span>
-            <span className="text-emerald-400 font-semibold block">Active</span>
-          </div>
-        </div>
-      </div>
+      {/* 1. Worker fleet: one row per machine (MacBook, second laptop, Linux box...) */}
+      <AgentsCard agents={agents} compact queuedCount={queuedTasks.length} />
 
       {/* 2. Urgent Attention: Awaiting Approval Banner */}
       {awaitingTask && (

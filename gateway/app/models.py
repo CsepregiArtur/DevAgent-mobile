@@ -51,6 +51,12 @@ class CreateTaskPayload(BaseModel):
     model: str | None = None
     gates: list[GateName] | None = None
     idempotency_key: str | None = Field(default=None, alias="idempotencyKey", max_length=128)
+    # Multi-agent fleet: pin the task to one agent and/or require capabilities
+    # (e.g. ["macos", "pull-request"]) advertised by the agent in its hello.
+    agent_id: str | None = Field(default=None, alias="agentId", max_length=128)
+    required_capabilities: list[str] | None = Field(
+        default=None, alias="requiredCapabilities"
+    )
 
     @field_validator("instruction")
     @classmethod
@@ -215,6 +221,14 @@ def checkpoint_to_dict(row: dict[str, Any]) -> dict[str, Any]:
 def agent_to_dict(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
+    capabilities = row.get("capabilities_json")
+    if isinstance(capabilities, str):
+        try:
+            import json as _json
+
+            capabilities = _json.loads(capabilities)
+        except ValueError:
+            capabilities = []
     return {
         "agentId": row["agent_id"],
         "hostname": row["hostname"],
@@ -226,5 +240,5 @@ def agent_to_dict(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "activeTaskId": row.get("active_task_id"),
         "batteryLevel": row.get("battery_level"),
         "isSimulated": bool(row.get("is_simulated")),
-        "capabilities": row.get("capabilities_json") or [],
+        "capabilities": capabilities or [],
     }

@@ -1,8 +1,10 @@
 import type {
   AgentInfo,
+  AgentsResponse,
   ApprovalDecisionPayload,
   CreateTaskPayload,
   Diagnostics,
+  FleetStatus,
   Task,
   TaskApproval,
   TaskEvent,
@@ -99,14 +101,25 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export async function fetchAgentStatus(): Promise<{
-  connected: boolean;
-  status: string;
-  info: AgentInfo;
-  secondsSinceHeartbeat: number;
-  isSimulated: boolean;
-}> {
+export async function fetchAgentStatus(): Promise<FleetStatus> {
   const res = await fetch(apiUrl('/api/agent/status'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+/** The fleet: every agent the gateway knows, with liveness and capabilities. */
+export async function fetchAgents(): Promise<AgentsResponse> {
+  const res = await fetch(apiUrl('/api/agents'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+/** Forget a decommissioned agent that is no longer connected. */
+export async function removeAgent(agentId: string): Promise<{ removed: string }> {
+  const res = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}`), {
+    method: 'DELETE',
     headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);

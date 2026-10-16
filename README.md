@@ -26,8 +26,7 @@ protocol WebSocket, troubleshooting, backup) este în [`docs/DEPLOY.md`](docs/DE
 * **stări explicite**: `queued`, `running`, `awaiting_approval` (alias `waiting_approval`), `completed`, `failed`, `cancelled`;
 * **evenimente și progres în timp real**: SSE per sarcină și global, replay după `Last-Event-ID`;
 * **aprobarea modificărilor înainte de aplicare**: propunere cu `hash` (optimistic locking, `409` la propunere expirată), granularitate per sarcină / per fișier / per hunk, mai multe gate-uri în ordine `plan → diff → apply → commit`;
-* **reconectarea agentului și reluarea sigură**: heartbeat + watchdog, sarcina întreruptă revine în coadă și se reia din ultimul checkpoint (`resume`, `await_approval`, `apply_approved`).
-
+* **reconectarea agentului și reluarea sigură**: heartbeat + watchdog, sarcina întreruptă revine în coadă și se reia din ultimul checkpoint (`resume`, `await_approval`, `apply_approved`).* **flotă multi-agent**: oricâte mașini (MacBook, al doilea laptop, un Linux box) se pot conecta simultan — fiecare cu `DEVAGENT_AGENT_ID` propriu; sarcina merge la primul worker liber care satisface cerințele, sau o fixezi pe o mașină (`agentId`) / pe capabilități (`requiredCapabilities`, ex. `["pull-request"]`).
 ---
 
 ## Pornire rapidă
@@ -71,6 +70,9 @@ npm run cap:open                   # deschide Xcode → rulare pe iPhone / TestF
 În shell-ul nativ iOS originea este `capacitor://localhost`, de aceea URL-ul și
 tokenul se configurează la runtime și se salvează pe dispozitiv.
 
+Link de configurare unică (util de pe telefon):
+`https://deepseek-api.cs-hub.xyz/mobile/?token=<DEVAGENT_TOKEN>`.
+
 ### 3. Agentul de pe MacBook
 
 ```sh
@@ -80,6 +82,14 @@ chmod 600 ~/.devagent/agent.env     # token agent, workspaces permise, endpoint 
 python3 agent/devagent_agent.py --check
 python3 agent/devagent_agent.py --verbose        # sau launchd: agent/com.devagent.agent.plist
 ```
+
+Pe fiecare mașină suplimentară repeți pașii cu alt `DEVAGENT_AGENT_ID` (implicit =
+numele hostului) și **același** `DEVAGENT_AGENT_TOKEN`. Toate apar în aplicație ca o
+flotă, iar în ecranul de sarcină nouă alegi „Run on: Any idle agent" sau o mașină anume.
+
+> Dacă gateway-ul e publicat prin Cloudflare, agentul are nevoie de headere de browser
+> (`DEVAGENT_BROWSER_HEADERS=true`, implicit) — altfel Cloudflare răspunde `403` la
+> handshake și agentul apare offline deși procesul rulează.
 
 ### 4. Test end-to-end
 
@@ -125,6 +135,7 @@ pentru `EventSource`). `/healthz` este public.
 `GET /api/agent/status` · `GET|POST /api/tasks` · `GET /api/tasks/{id}` ·
 `POST /api/tasks/{id}/approval` · `POST /api/tasks/{id}/cancel` · `POST /api/tasks/{id}/retry` ·
 `GET /api/tasks/{id}/events` (SSE) · `GET /api/events` (SSE global) ·
+`GET /api/agents` (flotă) · `DELETE /api/agents/{id}` (uită un agent deconectat) ·
 `GET /api/diagnostics` · `GET /api/workspaces` · `WS /agent/ws`
 
 Detalii complete: [`docs/DEPLOY.md`](docs/DEPLOY.md) §9 (API) și §10 (protocol WebSocket).

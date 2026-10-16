@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { TaskMode, CreateTaskPayload } from '../../types/agent';
+import type { AgentInfo, TaskMode, CreateTaskPayload } from '../../types/agent';
 import { createTask, ApiError } from '../../services/api';
 import { 
   Send, 
@@ -11,6 +11,7 @@ import {
   AlertCircle, 
   CheckCircle2, 
   Loader2,
+  Laptop,
   WifiOff
 } from 'lucide-react';
 
@@ -18,6 +19,8 @@ interface NewTaskScreenProps {
   workspaces: string[];
   defaultWorkspace: string;
   agentConnected: boolean;
+  /** the fleet: lets the operator pin the task to one machine */
+  agents: AgentInfo[];
   onTaskCreated: (taskId: string) => void;
   onCancel: () => void;
 }
@@ -26,6 +29,7 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
   workspaces,
   defaultWorkspace,
   agentConnected,
+  agents,
   onTaskCreated,
   onCancel,
 }) => {
@@ -33,8 +37,11 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
   const [workspace, setWorkspace] = useState(defaultWorkspace || workspaces[0] || '~/dev/mobile-agent-platform');
   const [mode, setMode] = useState<TaskMode>('supervised');
   const [model, setModel] = useState('DeepSeek-Coder-V2.5');
+  const [targetAgentId, setTargetAgentId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const onlineAgents = agents.filter((agent) => agent.online);
 
   const promptChips = [
     'Add rate-limiter middleware for API routes',
@@ -56,6 +63,7 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
         workspace,
         mode,
         model,
+        ...(targetAgentId ? { agentId: targetAgentId } : {}),
       };
 
       const result = await createTask(payload);
@@ -97,9 +105,12 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
         <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2.5">
           <WifiOff className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
           <div className="space-y-1">
-            <p className="font-semibold text-amber-200">MacBook Agent is Offline</p>
+            <p className="font-semibold text-amber-200">
+              {targetAgentId ? `Agent '${targetAgentId}' is offline` : 'No agent is online right now'}
+            </p>
             <p className="text-[11px] text-amber-300/80 leading-relaxed">
-              Your task will be safely accepted and queued on the gateway. Execution will begin as soon as your MacBook agent reconnects.
+              The task is accepted and queued safely on the gateway. Execution starts as soon as a
+              matching worker connects (or reconnects).
             </p>
           </div>
         </div>
@@ -171,6 +182,30 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
               </option>
             ))}
           </select>
+        </div>
+
+        {/* Worker selection (multi-machine fleets) */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <Laptop className="w-3.5 h-3.5 text-zinc-500" />
+            <span>Run on</span>
+          </label>
+          <select
+            value={targetAgentId}
+            onChange={(e) => setTargetAgentId(e.target.value)}
+            disabled={isSubmitting}
+            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs font-mono text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition"
+          >
+            <option value="">Any idle agent ({onlineAgents.length} online)</option>
+            {agents.map((agent) => (
+              <option key={agent.agentId} value={agent.agentId}>
+                {agent.hostname} · {agent.agentId} {agent.online ? '· online' : '· offline'}
+              </option>
+            ))}
+          </select>
+          <p className="text-[10px] text-zinc-500">
+            Pin the task to one machine, or let the gateway pick the first capable idle worker.
+          </p>
         </div>
 
         {/* Execution Mode */}

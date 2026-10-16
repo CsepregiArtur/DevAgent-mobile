@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import type { AgentInfo, Diagnostics, Task } from './types/agent';
+import type { AgentInfo, Diagnostics, FleetStatus, Task } from './types/agent';
 import { 
   fetchAgentStatus, 
   fetchTasks, 
@@ -18,12 +18,25 @@ import { HistoryScreen } from './components/screens/HistoryScreen';
 import { SettingsScreen } from './components/screens/SettingsScreen';
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 
+/** Used when the gateway cannot be reached: no agents, nothing running. */
+const EMPTY_FLEET: FleetStatus = {
+  connected: false,
+  status: 'offline',
+  info: null,
+  secondsSinceHeartbeat: null,
+  isSimulated: false,
+  agents: [],
+  onlineAgents: 0,
+  totalAgents: 0,
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [agentConnected, setAgentConnected] = useState<boolean>(true);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
   const [workspaces, setWorkspaces] = useState<string[]>(['~/dev/mobile-agent-platform']);
@@ -39,13 +52,7 @@ export default function App() {
 
     try {
       const [agentRes, tasksRes, diagRes, wsRes] = await Promise.all([
-        fetchAgentStatus().catch(() => ({
-          connected: false,
-          status: 'offline',
-          info: null as any,
-          secondsSinceHeartbeat: 0,
-          isSimulated: false,
-        })),
+        fetchAgentStatus().catch(() => EMPTY_FLEET),
         fetchTasks().catch(() => ({ tasks: [], total: 0, offset: 0, limit: 50 })),
         fetchDiagnostics().catch(() => null),
         fetchWorkspaces().catch(() => ({
@@ -56,6 +63,7 @@ export default function App() {
 
       setAgentConnected(agentRes.connected);
       if (agentRes.info) setAgentInfo(agentRes.info);
+      setAgents(agentRes.agents || []);
       setTasks(tasksRes.tasks || []);
       if (diagRes) setDiagnostics(diagRes);
       if (wsRes.workspaces) setWorkspaces(wsRes.workspaces);
@@ -108,7 +116,12 @@ export default function App() {
             const data = JSON.parse(e.data);
             if (data.agentInfo) {
               setAgentInfo(data.agentInfo);
-              setAgentConnected(data.agentInfo.status !== 'offline');
+            }
+            if (Array.isArray(data.agents)) {
+              setAgents(data.agents);
+              setAgentConnected(data.agents.some((agent: AgentInfo) => agent.online));
+            } else {
+              setAgentConnected(data.agentInfo?.status !== 'offline');
             }
           } catch (err) {
             console.error('Failed to parse agent_status SSE', err);
@@ -173,6 +186,7 @@ export default function App() {
       <Header
         agentStatus={agentInfo?.status || (agentConnected ? 'online' : 'offline')}
         isSimulated={agentInfo?.isSimulated}
+        agents={agents}
         onRefresh={() => loadAllData(false)}
         isRefreshing={isRefreshing}
       />
@@ -213,6 +227,7 @@ export default function App() {
               <DashboardScreen
                 agentInfo={agentInfo}
                 agentConnected={agentConnected}
+                agents={agents}
                 tasks={tasks}
                 diagnostics={diagnostics}
                 onNavigateToTask={handleNavigateToTask}
@@ -236,6 +251,7 @@ export default function App() {
                 workspaces={workspaces}
                 defaultWorkspace={defaultWorkspace}
                 agentConnected={agentConnected}
+                agents={agents}
                 onTaskCreated={handleTaskCreated}
                 onCancel={() => setActiveTab('home')}
               />
@@ -253,6 +269,7 @@ export default function App() {
               <SettingsScreen
                 diagnostics={diagnostics}
                 agentInfo={agentInfo}
+                agents={agents}
                 onRefresh={() => loadAllData(false)}
               />
             )}

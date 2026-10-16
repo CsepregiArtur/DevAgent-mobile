@@ -450,6 +450,140 @@ def test_cancel_notifies_the_agent_and_is_terminal(client: TestClient) -> None:
 # SSE
 # ----------------------------------------------------------------------
 # The SSE endpoints are validated against a real uvicorn instance (see
-# devagent/tests/smoke.sh): starlette's in-process TestClient does not stream
+# scripts/smoke.sh): starlette's in-process TestClient does not stream
 # an endless ``text/event-stream`` body, so a trivially passing assertion here
 # would not prove that live progress works on a phone.
+
+
+# ----------------------------------------------------------------------
+# multi-agent fleet (the MacBook is not the only worker)
+# ----------------------------------------------------------------------
+HELLO = {"hostname": "host", "os": "test-os", "workspace": "~/dev/x", "capabilities": ["git"]}
+
+
+def agent_url(agent_id: str) -> str:
+    return f"/mobile/agent/ws?token={TOKEN}&agentId={agent_id}"
+
+
+def say_hello(ws, **overrides) -> dict:
+    ws.send_json({"type": "hello", **HELLO, **overrides})
+    return ws.receive_json()
+
+
+def test_fleet_status_aggregates_every_agent(client: TestClient) -> None:
+    with client.websocket_connect(agent_url("agent-a")) as first, client.websocket_connect(
+        agent_url("agent-b")
+    ) as second:
+        assert say_hello(first, hostname="macbook", capabilities=["git", "macos"])["type"] == "welcome"
+        assert say_hello(second, hostname="linux-box", capabilities=["git"])["type"] == "welcome"
+
+        status = client.get("/mobile/api/agent/status", headers=AUTH).json()
+        assert status["connected"] is True
+        assert status["onlineAgents"] == 2
+        assert status["totalAgents"] == 2
+        assert {agent["agentId"] for agent in status["agents"]} == {"agent-a", "agent-b"}
+        assert all(agent["online"] for agent in status["agents"])
+        # capabilities must be a list, not a JSON string
+        macos = next(agent for agent in status["agents"] if agent["agentId"] == "agent-a")
+        assert macos["capabilities"] == ["git", "macos"]
+        assert macos["secondsSinceHeartbeat"] == 0
+
+        fleet = client.get("/mobile/api/agents", headers=AUTH).json()
+        assert fleet["onlineAgents"] == 2
+        assert fleet["primaryAgentId"] in {"agent-a", "agent-b"}
+
+        workspaces = client.get("/mobile/api/workspaces", headers=AUTH).json()
+        assert {agent["agentId"] for agent in workspaces["agents"]} == {"agent-a", "agent-b"}
+
+    after = client.get("/mobile/api/agent/status", headers=AUTH).json()
+    assert after["onlineAgents"] == 0
+    assert after["connected"] is False
+
+
+def test_task_can_be_pinned_to_one_agent(client: TestClient) -> None:
+    with client.websocket_connect(agent_url("agent-a")) as first, client.websocket_connect(
+        agent_url("agent-b")
+    ) as second:
+        say_hello(first)
+        say_hello(second)
+
+        task = create_task(client, agentId="agent-b")
+        assignment = second.receive_json()
+        assert assignment["type"] == "task_assign"
+        assert assignment["task"]["id"] == task["id"]
+        assert assignment["task"]["agentId"] == "agent-b"
+
+        detail = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+        assert detail["status"] == "running"
+
+        # an unknown target is rejected instead of silently running elsewhere
+        response = client.post(
+            "/mobile/api/tasks",
+            json={"instruction": "x", "agentId": "nope"},
+            headers=AUTH,
+        )
+        assert response.status_code == 404
+
+
+def test_required_capabilities_route_to_a_capable_agent(client: TestClient) -> None:
+    with client.websocket_connect(agent_url("plain")) as plain, client.websocket_connect(
+        agent_url("turbo")
+    ) as turbo:
+        say_hello(plain, capabilities=["git"])
+        say_hello(turbo, capabilities=["git", "pull-request"])
+
+        task = create_task(client, requiredCapabilities=["pull-request"])
+        assignment = turbo.receive_json()
+        assert assignment["type"] == "task_assign"
+        assert assignment["task"]["id"] == task["id"]
+
+
+def test_task_waits_in_queue_when_no_agent_has_the_capability(client: TestClient) -> None:
+    with client.websocket_connect(agent_url("plain")) as plain:
+        say_hello(plain, capabilities=["git"])
+        task = create_task(client, requiredCapabilities=["gpu"])
+
+        detail = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+        assert detail["status"] == "queued"
+        assert detail["events"][-1]["details"]["requiredCapabilities"] == ["gpu"]
+
+
+def test_old_agents_can_be_forgotten_once_disconnected(client: TestClient) -> None:
+    with client.websocket_connect(agent_url("agent-old")) as ws:
+        say_hello(ws)
+        assert client.delete("/mobile/api/agents/agent-old", headers=AUTH).status_code == 409
+
+    assert client.delete("/mobile/api/agents/agent-old", headers=AUTH).status_code == 200
+    assert client.get("/mobile/api/agents", headers=AUTH).json()["agents"] == []
+    assert client.delete("/mobile/api/agents/agent-old", headers=AUTH).status_code == 404
+
+
+def test_gateway_restart_reconciles_agents_and_running_tasks(tmp_path: Path) -> None:
+    """A restart must not leave a ghost 'online' agent or a stuck 'running' task."""
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as first_run:
+        with first_run.websocket_connect(agent_url("agent-a")) as ws:
+            say_hello(ws)
+            task = create_task(first_run)
+            assert ws.receive_json()["type"] == "task_assign"
+            running = first_run.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+            assert running["status"] == "running"
+
+    with TestClient(create_app(make_settings(tmp_path))) as second_run:
+        recovered = second_run.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+        assert recovered["status"] == "queued"
+        assert recovered["interruptedAt"] is not None
+        assert recovered["agentId"] == "agent-a"
+        assert any("Gateway restarted" in event["message"] for event in recovered["events"])
+
+        fleet = second_run.get("/mobile/api/agents", headers=AUTH).json()
+        assert fleet["agents"][0]["status"] == "offline"
+        assert fleet["onlineAgents"] == 0
+
+        # ...and the task is picked up again as soon as an agent reconnects
+        with second_run.websocket_connect(agent_url("agent-a")) as ws:
+            welcome = say_hello(ws)
+            assert task["id"] in welcome["resumedTasks"]
+            resume = ws.receive_json()
+            assert resume["type"] == "task_resume"
+            assert resume["action"] == "resume"

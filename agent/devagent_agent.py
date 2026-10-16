@@ -92,6 +92,8 @@ class Config:
     dry_run: bool
     command_timeout: float
     llm_timeout: float
+    browser_headers: bool = True
+    origin: str | None = None
 
     @staticmethod
     def from_env(env: dict[str, str] | None = None) -> "Config":
@@ -125,6 +127,10 @@ class Config:
             dry_run=_bool(env.get("DEVAGENT_DRY_RUN"), False),
             command_timeout=float(env.get("DEVAGENT_COMMAND_TIMEOUT", "900")),
             llm_timeout=float(env.get("DEVAGENT_LLM_TIMEOUT", "180")),
+            # Cloudflare's Browser Integrity Check rejects handshakes that do not look
+            # like a browser (403), so the agent sends a normal header set by default.
+            browser_headers=_bool(env.get("DEVAGENT_BROWSER_HEADERS"), True),
+            origin=env.get("DEVAGENT_ORIGIN") or None,
         )
 
 
@@ -336,6 +342,45 @@ class GatewayClient:
             f"&agentId={urllib.parse.quote(self.config.agent_id)}"
         )
 
+    def handshake_headers(self) -> dict[str, str] | None:
+        """Browser-like headers for the upgrade request.
+
+        Cloudflare (and some corporate proxies) run a Browser Integrity Check that
+        answers ``403`` to handshakes without Accept/Accept-Language/User-Agent.
+        Set ``DEVAGENT_BROWSER_HEADERS=false`` when talking to a bare gateway.
+        """
+        if not self.config.browser_headers:
+            return None
+        parsed = urllib.parse.urlparse(self.config.gateway_url)
+        scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
+        origin = self.config.origin or f"{scheme}://{parsed.netloc}"
+        return {
+            "User-Agent": (
+                f"DevAgent-Agent/{CLIENT_VERSION} ({platform.system()} {platform.release()}; "
+                f"{platform.machine()})"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": origin,
+        }
+
+    async def _connect(self):
+        """Open the websocket, tolerating both websockets kwargs spellings."""
+        headers = self.handshake_headers()
+        kwargs: dict[str, Any] = {
+            "ping_interval": 20,
+            "ping_timeout": 20,
+            "max_size": 8 * 1024 * 1024,
+        }
+        if headers:
+            kwargs["additional_headers"] = headers
+        try:
+            return await websockets.connect(self.url, **kwargs)
+        except TypeError:  # websockets < 14 uses extra_headers
+            if "additional_headers" in kwargs:
+                kwargs["extra_headers"] = kwargs.pop("additional_headers")
+            return await websockets.connect(self.url, **kwargs)
+
     async def send(self, payload: dict[str, Any]) -> bool:
         if self.websocket is None:
             return False
@@ -354,9 +399,8 @@ class GatewayClient:
         while not self.stopping.is_set():
             try:
                 LOG.info("connecting to %s", self.config.gateway_url)
-                async with websockets.connect(
-                    self.url, ping_interval=20, ping_timeout=20, max_size=8 * 1024 * 1024
-                ) as websocket:
+                websocket = await self._connect()
+                async with websocket:
                     self.websocket = websocket
                     self.connected.set()
                     delay = 1.0

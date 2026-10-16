@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     attempt         INTEGER NOT NULL DEFAULT 0,
     result_json     TEXT,
     error           TEXT,
-    idempotency_key TEXT UNIQUE
+    idempotency_key TEXT UNIQUE,
+    target_agent_id TEXT,
+    required_capabilities_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_events (
@@ -136,6 +138,15 @@ TASK_FIELDS = {
     "result_json",
     "error",
     "idempotency_key",
+    "target_agent_id",
+    "required_capabilities_json",
+}
+
+# Columns added after the first release (applied on connect, SQLite has no
+# "ALTER TABLE ... IF NOT EXISTS").
+MIGRATIONS: dict[str, str] = {
+    "target_agent_id": "ALTER TABLE tasks ADD COLUMN target_agent_id TEXT",
+    "required_capabilities_json": "ALTER TABLE tasks ADD COLUMN required_capabilities_json TEXT",
 }
 
 
@@ -190,6 +201,16 @@ class Database:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
         await self._conn.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        columns = {
+            row["name"]
+            for row in await self._fetchall("PRAGMA table_info(tasks)")
+        }
+        for column, statement in MIGRATIONS.items():
+            if column not in columns:
+                await self._write(statement)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -250,14 +271,17 @@ class Database:
         gates: list[str],
         agent_id: str | None = None,
         idempotency_key: str | None = None,
+        target_agent_id: str | None = None,
+        required_capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
         task_id = new_task_id()
         now = utcnow()
         await self._write(
             """
             INSERT INTO tasks (id, instruction, workspace, mode, model, status,
-                               created_at, updated_at, gates_json, agent_id, idempotency_key)
-            VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+                               created_at, updated_at, gates_json, agent_id, idempotency_key,
+                               target_agent_id, required_capabilities_json)
+            VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -270,6 +294,8 @@ class Database:
                 json.dumps(gates),
                 agent_id,
                 idempotency_key,
+                target_agent_id,
+                json.dumps(required_capabilities or []),
             ),
         )
         task = await self.get_task(task_id)
@@ -331,6 +357,13 @@ class Database:
             "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
         )
         return self._decode_task(row) if row else None
+
+    async def queued_candidates(self) -> list[dict[str, Any]]:
+        """All queued tasks, oldest first - used for capability/agent matching."""
+        rows = await self._fetchall(
+            "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC"
+        )
+        return [self._decode_task(r) for r in rows]
 
     async def queued_tasks(self) -> list[dict[str, Any]]:
         rows = await self._fetchall(
@@ -666,19 +699,31 @@ class Database:
         return agent
 
     async def get_agent(self, agent_id: str) -> dict[str, Any] | None:
-        return await self._fetchone("SELECT * FROM agents WHERE agent_id = ?", (agent_id,))
+        row = await self._fetchone("SELECT * FROM agents WHERE agent_id = ?", (agent_id,))
+        return self._decode_agent(row) if row else None
 
     async def list_agents(self) -> list[dict[str, Any]]:
-        return await self._fetchall("SELECT * FROM agents ORDER BY last_heartbeat DESC")
+        rows = await self._fetchall("SELECT * FROM agents ORDER BY last_heartbeat DESC")
+        return [self._decode_agent(row) for row in rows]
 
     async def primary_agent(self) -> dict[str, Any] | None:
-        """Most recently seen real (non simulated) agent."""
+        """Most recently seen real agent (kept for single-agent consumers)."""
         row = await self._fetchone(
             "SELECT * FROM agents WHERE is_simulated = 0 ORDER BY last_heartbeat DESC LIMIT 1"
         )
         if row:
-            return row
-        return await self._fetchone("SELECT * FROM agents ORDER BY last_heartbeat DESC LIMIT 1")
+            return self._decode_agent(row)
+        row = await self._fetchone("SELECT * FROM agents ORDER BY last_heartbeat DESC LIMIT 1")
+        return self._decode_agent(row) if row else None
+
+    async def mark_all_agents_offline(self) -> None:
+        """Gateway restart: no socket survives, so nothing may stay 'online'."""
+        await self._write(
+            "UPDATE agents SET status = 'offline', active_task_id = NULL WHERE status != 'offline'"
+        )
+
+    async def delete_agent(self, agent_id: str) -> None:
+        await self._write("DELETE FROM agents WHERE agent_id = ?", (agent_id,))
 
     async def set_agent_status(
         self,
@@ -701,10 +746,11 @@ class Database:
             )
 
     async def stale_agents(self, cutoff_iso: str) -> list[dict[str, Any]]:
-        return await self._fetchall(
+        rows = await self._fetchall(
             "SELECT * FROM agents WHERE status != 'offline' AND last_heartbeat < ?",
             (cutoff_iso,),
         )
+        return [self._decode_agent(row) for row in rows]
 
     # -- decoding --------------------------------------------------------
     @staticmethod
@@ -712,6 +758,7 @@ class Database:
         row = dict(row)
         row["gates_json"] = _loads(row.get("gates_json"), ["diff"])
         row["result_json"] = _loads(row.get("result_json"), None)
+        row["required_capabilities_json"] = _loads(row.get("required_capabilities_json"), [])
         return row
 
     @staticmethod
@@ -732,4 +779,11 @@ class Database:
     def _decode_checkpoint(row: dict[str, Any]) -> dict[str, Any]:
         row = dict(row)
         row["payload_json"] = _loads(row.get("payload_json"), {})
+        return row
+
+    @staticmethod
+    def _decode_agent(row: dict[str, Any]) -> dict[str, Any]:
+        row = dict(row)
+        row["capabilities_json"] = _loads(row.get("capabilities_json"), [])
+        row["meta_json"] = _loads(row.get("meta_json"), {})
         return row

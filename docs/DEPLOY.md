@@ -32,6 +32,7 @@ Public: **https://deepseek-api.cs-hub.xyz/mobile** (PWA) ·
 | Gateway (API + coadă + stări + aprobări + WebSocket agenți) | `/opt/deepseek-proxy/devagent/gateway` | ✅ implementat, 12 teste trec |
 | Protocol agent (WS + heartbeat + checkpoint + aprobare) | `app/api_agent.py`, secțiunea 7 | ✅ implementat |
 | Agent macOS de referință | `/opt/deepseek-proxy/devagent/agent/devagent_agent.py` | ✅ implementat |
+| Flotă multi-agent (mai multe laptopuri simultan) | gateway + PWA + agent | ✅ implementat (18 teste): status agregat, targetare per agent, capabilități, „forget" pentru agenții pensionați |
 | PWA în `DevAgent-mobile` | `/opt/deepseek-proxy/mobile` | ✅ adaptat pentru `/mobile`, token + URL configurabil, `npm run build` OK |
 | Aplicație iOS nativă (Capacitor → Xcode) | `mobile/capacitor.config.ts`, `mobile/ios` | 🟡 Capacitor configurat în repo; proiectul Xcode se generează pe MacBook (pasul 6) |
 | Ops: Redis, systemd, regulă tunnel, backup | `devagent/systemd`, `/etc/deepseek-devagent.env` | ✅ aplicate pe VPS (Redis activ, `devagent-gateway.service`, regulă `/mobile*` în ambele tuneluri, `backup.sh` extins) |
@@ -150,6 +151,12 @@ Fiecare fază este independentă și verificabilă. Statusul reflectă ce este d
 21. Redis local (`127.0.0.1:6379`), serviciu systemd `devagent-gateway.service`, regulă de path în tunnelul Cloudflare existent.
 22. Smoke test end-to-end + integrare în `backup.sh`.
 23. Enrolarea MacBook-ului (launchd) și testul de reconectare „la minut real”.
+
+### Faza 8 - flotă multi-agent (✅ gata)
+24. Status agregat în `/api/agent/status` (`agents[]`, `onlineAgents`, `totalAgents`) și listă dedicată `/api/agents` (cu `online`, `secondsSinceHeartbeat`, `capabilități`).
+25. Targetare: `agentId` (pin pe o mașină) și `requiredCapabilities` (ex. `["pull-request"]`); dispatch-ul alege primul agent liber care satisface cerințele, altfel sarcina rămâne în coadă.
+26. UI: badge de flotă în header, card de flotă în Dashboard, listă completă + „forget" în Settings, selector „Run on" în ecranul de sarcină nouă.
+27. Restart de gateway: `reconcile_on_startup` marchează toți agenții `offline` și repune sarcinile `running` în coadă (cu `interrupted_at`), ca să nu rămână nici un agent „fantomă" sau sarcină blocată.
 
 ---
 
@@ -309,7 +316,12 @@ curl -sI https://deepseek-api.cs-hub.xyz/mobile/ | head -3
 
 Pe telefon: deschide `https://deepseek-api.cs-hub.xyz/mobile`, adaugă tokenul în
 ecranul **Settings** (se salvează în `localStorage`), apoi „Add to Home Screen”.
+Sau, mai rapid, cu link de configurare unică (tokenul se salvează pe dispozitiv și
+dispare din bara de adrese):
 
+```
+https://deepseek-api.cs-hub.xyz/mobile/?baseUrl=https://deepseek-api.cs-hub.xyz/mobile&token=<DEVAGENT_TOKEN>
+```
 Dev local fără build: `npm run dev` pornește serverul Express mock din repo
 (`server.ts`) — util pentru UI, dar fără coadă/reluare reale.
 
@@ -482,7 +494,8 @@ Toate rutele cer token: `Authorization: Bearer <DEVAGENT_TOKEN>` sau `?token=`
 | GET | `/mobile/api/agent/status` | stare agent + `isSimulated` |
 | POST | `/mobile/api/agent/heartbeat` | heartbeat REST (compat; oprește simulatorul) |
 | POST | `/mobile/api/agent/simulate-toggle` | activează/dezactivează simulatorul |
-| GET | `/mobile/api/agents` | toți agenții cunoscuți |
+| GET | `/mobile/api/agents` | flota: toți agenții cunoscuți + `online`, `secondsSinceHeartbeat`, `capabilities`, `onlineAgents`, `primaryAgentId` |
+| DELETE | `/mobile/api/agents/{id}` | uită un agent deconectat (`409` dacă e conectat) |
 | GET | `/mobile/api/tasks?status=&search=&limit=&offset=` | listare filtrare/paginare |
 | POST | `/mobile/api/tasks` | `{instruction, workspace?, mode?, model?, gates?, idempotencyKey?}` → `201` |
 | GET | `/mobile/api/tasks/{id}` | sarcina cu `events`, `approval`, `approvals`, `checkpoints` |
@@ -560,7 +573,7 @@ repetat nu creează duplicate.
 |---|---|---|
 | `401 Invalid gateway credentials` | token lipsă/greșit | trimite `Authorization: Bearer` sau `?token=`; verifică `DEVAGENT_TOKEN` |
 | `/mobile` → `503 PWA bundle not built yet` | `dist/` lipsă | `cd mobile && npm run build`; verifică `DEVAGENT_STATIC_DIR` |
-| Agentul apare `offline` | proces oprit / Wi-Fi | `tail -f ~/.devagent/agent.err.log`; verifică `DEVAGENT_GATEWAY_URL` |
+| Agentul apare `offline` deși procesul rulează | Cloudflare face **Browser Integrity Check** și răspunde `403` la handshake-ul WebSocket fără headere de browser | agentul trimite deja `User-Agent`/`Accept`/`Accept-Language`/`Origin` (`DEVAGENT_BROWSER_HEADERS`, implicit `true`); verifică cu `python3 - <<'PY'` … `websockets.connect(wss://…/mobile/agent/ws?token=…&agentId=probe)` — `403` = filtru de rețea, nu gateway-ul |
 | Sarcina rămâne `queued` | niciun agent online, simulator oprit | pornește agentul sau simulatorul; `journalctl -u devagent-gateway -f` |
 | Nu apar evenimente live | Redis căzut | `redis-cli ping`; gateway-ul funcționează și fără Redis (fan-out local) |
 | `409 hash mismatch` | propunerea s-a schimbat | reîncarcă sarcina și aprobă hash-ul curent |

@@ -56,14 +56,30 @@ def build_router(service: TaskService, settings: Settings) -> APIRouter:
 
     @router.get("/agents")
     async def agents() -> dict[str, Any]:
+        """The fleet: every known agent with liveness + capabilities."""
         from .models import agent_to_dict
 
+        snapshot = await service.agent_status_snapshot()
         rows = []
         for agent in await service.db.list_agents():
             payload = agent_to_dict(agent) or {}
             payload["online"] = service.hub.is_online(agent["agent_id"])
+            payload["secondsSinceHeartbeat"] = service._heartbeat_age_seconds(agent)
             rows.append(payload)
-        return {"agents": rows}
+        return {
+            "agents": rows,
+            "onlineAgents": snapshot["onlineAgents"],
+            "totalAgents": snapshot["totalAgents"],
+            "primaryAgentId": (snapshot.get("info") or {}).get("agentId"),
+        }
+
+    @router.delete("/agents/{agent_id}")
+    async def delete_agent(agent_id: str) -> dict[str, Any]:
+        try:
+            await service.remove_agent(agent_id)
+        except ServiceError as error:
+            raise _raise(error) from error
+        return {"removed": agent_id}
 
     @router.post("/agent/heartbeat")
     async def heartbeat(payload: HeartbeatPayload) -> dict[str, Any]:
@@ -312,7 +328,15 @@ async def _global_event_stream(service: TaskService, after_seq: int) -> AsyncIte
                 agent = payload.get("agent") or {}
                 yield (
                     "event: agent_status\ndata: "
-                    + json.dumps({"agentInfo": agent.get("info"), "status": agent.get("status")})
+                    + json.dumps(
+                        {
+                            "agentInfo": agent.get("info"),
+                            "status": agent.get("status"),
+                            "agents": agent.get("agents") or [],
+                            "onlineAgents": agent.get("onlineAgents", 0),
+                            "totalAgents": agent.get("totalAgents", 0),
+                        }
+                    )
                     + "\n\n"
                 )
             elif kind == "event":

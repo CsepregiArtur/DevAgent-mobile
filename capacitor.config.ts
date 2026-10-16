@@ -15,7 +15,6 @@ const config: CapacitorConfig = {
   appId: 'xyz.cshub.devagent',
   appName: 'DevAgent',
   webDir: 'dist',
-  bundledWebRuntime: false,
   backgroundColor: '#090d16',
   ios: {
     contentInset: 'always',
