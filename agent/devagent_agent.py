@@ -62,7 +62,18 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.1.4"
+ACK_TYPES = {
+    "event_ack",
+    "progress_ack",
+    "log_ack",
+    "checkpoint_ack",
+    "approval_ack",
+    "result_ack",
+    "heartbeat_ack",
+    "pong",
+    "cancel_ack",
+}
+CLIENT_VERSION = "v1.1.5"
 
 
 # ----------------------------------------------------------------------
@@ -794,6 +805,10 @@ class GatewayClient:
             await self.send({"type": "pong", "serverTime": time.time()})
         elif message_type == "error":
             LOG.warning("gateway error: %s %s", message.get("error"), message.get("details") or "")
+        elif message_type in ACK_TYPES:
+            # Acknowledgements are informational: the gateway answered the message
+            # we just sent. Nothing to do, and no reason to call them "unhandled".
+            LOG.debug("gateway ack: %s", message_type)
         else:
             LOG.debug("unhandled gateway message: %s", message_type)
 
