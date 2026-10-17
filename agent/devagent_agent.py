@@ -73,7 +73,7 @@ ACK_TYPES = {
     "pong",
     "cancel_ack",
 }
-CLIENT_VERSION = "v1.1.5"
+CLIENT_VERSION = "v1.1.6"
 
 
 # ----------------------------------------------------------------------
@@ -1075,6 +1075,13 @@ class TaskRunner:
         allowed = [Path(root).expanduser().resolve() for root in self.config.workspaces]
         for root in allowed:
             if candidate == root or root in candidate.parents:
+                if not candidate.exists():
+                    raise RuntimeError(
+                        f"workspace {candidate} does not exist on this machine.\n"
+                        f"      DEVAGENT_WORKSPACES = {[str(r) for r in allowed]}\n"
+                        "      Fix the path (check for typos) in the agent env file and restart,"
+                        " or create the task with a folder that exists."
+                    )
                 return candidate
         raise RuntimeError(
             f"workspace {candidate} is outside the allowed roots {[str(r) for r in allowed]}.\n"
@@ -1883,10 +1890,20 @@ Usually your code folder, e.g. ~/dev or ~/Projects.
         "Allowed workspace roots",
         existing.get("DEVAGENT_WORKSPACES", _default_workspaces()),
     )
-    for entry in [part.strip() for part in workspaces.split(",") if part.strip()]:
-        resolved = Path(entry).expanduser()
-        if not resolved.exists():
-            print(f"   warning: {resolved} does not exist on this machine (created later?)")
+    while True:
+        missing = []
+        for entry in [part.strip() for part in workspaces.split(",") if part.strip()]:
+            resolved = Path(entry).expanduser()
+            if not resolved.exists():
+                missing.append(str(resolved))
+        if not missing:
+            break
+        print("   these paths do not exist on this machine:")
+        for path in missing:
+            print(f"     • {path}")
+        if _ask_bool("Save them anyway (the agent will refuse tasks there)?", False):
+            break
+        workspaces = _ask("Allowed workspace roots", workspaces)
 
     # 5 -- AI provider --------------------------------------------------
     _step(5, total, "AI provider")
@@ -2057,6 +2074,16 @@ async def amain(args: argparse.Namespace) -> int:
         for workspace in config.workspaces:
             root = Path(workspace).expanduser()
             print(f"  workspace {root}: {'ok' if root.exists() else 'MISSING'}")
+        missing_roots = [
+            str(Path(workspace).expanduser())
+            for workspace in config.workspaces
+            if not Path(workspace).expanduser().exists()
+        ]
+        if missing_roots:
+            print("\n  ⚠️  DEVAGENT_WORKSPACES points to missing folders:")
+            for path in missing_roots:
+                print(f"     • {path}")
+            print("     Tasks targeting them fail immediately; fix the path (typos!) and restart.")
         return 0
 
     runner = TaskRunner(config)
