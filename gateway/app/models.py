@@ -57,6 +57,8 @@ class CreateTaskPayload(BaseModel):
     required_capabilities: list[str] | None = Field(
         default=None, alias="requiredCapabilities"
     )
+    # AI provider: explicit choice, or omitted -> the gateway picks the default.
+    provider_id: str | None = Field(default=None, alias="providerId", max_length=128)
 
     @field_validator("instruction")
     @classmethod
@@ -84,12 +86,6 @@ class ApprovalDecisionPayload(BaseModel):
     # Per file / per hunk granularity: optional explicit decisions. When present,
     # only the approved paths/hunks are applied by the agent.
     items: list[ItemDecision] | None = None
-
-
-class SimulatorTogglePayload(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
-
-    enabled: bool | None = None
 
 
 class HeartbeatPayload(BaseModel):
@@ -160,6 +156,34 @@ def task_to_dict(
     if row.get("idempotency_key"):
         payload["idempotencyKey"] = row["idempotency_key"]
     payload["gates"] = row.get("gates_json") or ["diff"]
+    if row.get("provider_id"):
+        payload["providerId"] = row["provider_id"]
+    if row.get("target_agent_id"):
+        payload["targetAgentId"] = row["target_agent_id"]
+    return payload
+
+
+def provider_to_dict(row: dict[str, Any] | None, *, include_secret: bool = False) -> dict[str, Any] | None:
+    """Serialise a provider. The API key is masked except for agent dispatch."""
+    if row is None:
+        return None
+    api_key = row.get("api_key") or ""
+    payload: dict[str, Any] = {
+        "id": row["id"],
+        "name": row["name"],
+        "kind": row["kind"],
+        "baseUrl": row["base_url"],
+        "models": row.get("models_json") or [],
+        "defaultModel": row.get("default_model"),
+        "enabled": bool(row.get("enabled")),
+        "isDefault": bool(row.get("is_default")),
+        "hasApiKey": bool(api_key),
+        "apiKeyHint": ("…" + api_key[-4:]) if api_key else None,
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+    }
+    if include_secret:
+        payload["apiKey"] = api_key
     return payload
 
 

@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import type { AgentInfo, TaskMode, CreateTaskPayload } from '../../types/agent';
-import { createTask, ApiError } from '../../services/api';
+import React, { useEffect, useState } from 'react';
+import type { AgentInfo, ProviderInfo, TaskMode, CreateTaskPayload } from '../../types/agent';
+import { createTask, ApiError, fetchProviders } from '../../services/api';
 import { 
   Send, 
   X, 
@@ -38,8 +38,16 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
   const [mode, setMode] = useState<TaskMode>('supervised');
   const [model, setModel] = useState('DeepSeek-Coder-V2.5');
   const [targetAgentId, setTargetAgentId] = useState<string>('');
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [providerId, setProviderId] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchProviders()
+      .then((data) => setProviders((data.providers || []).filter((provider) => provider.enabled)))
+      .catch(() => setProviders([]));
+  }, []);
 
   const onlineAgents = agents.filter((agent) => agent.online);
 
@@ -64,6 +72,7 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
         mode,
         model,
         ...(targetAgentId ? { agentId: targetAgentId } : {}),
+        ...(providerId ? { providerId } : {}),
       };
 
       const result = await createTask(payload);
@@ -205,6 +214,32 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
           </select>
           <p className="text-[10px] text-zinc-500">
             Pin the task to one machine, or let the gateway pick the first capable idle worker.
+          </p>
+        </div>
+
+        {/* AI provider (the gateway falls back to its default) */}
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <Cpu className="w-3.5 h-3.5 text-zinc-500" />
+            <span>AI provider</span>
+          </label>
+          <select
+            value={providerId}
+            onChange={(e) => setProviderId(e.target.value)}
+            disabled={isSubmitting}
+            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs font-mono text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition"
+          >
+            <option value="">Gateway default</option>
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.name}
+                {provider.isDefault ? ' (default)' : ''} · {provider.defaultModel || 'model n/a'}
+              </option>
+            ))}
+          </select>
+          <p className="text-[10px] text-zinc-500">
+            Manage providers in Settings → AI providers. Selection is per task and never touches
+            the agent connection.
           </p>
         </div>
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +14,10 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api_agent import build_agent_router
+from .api_auth import build_router as build_auth_router
+from .api_providers import build_router as build_providers_router
 from .api_pwa import build_router
+from .auth import resolve_token
 from .config import Settings
 from .db import Database, utcnow
 from .events import EventBus
@@ -48,6 +50,33 @@ def is_protected_path(path: str, root_path: str) -> bool:
     return normalized == "/api" or normalized.startswith("/api/") or normalized == "/agent" or normalized.startswith(
         "/agent/"
     )
+
+
+# Reachable without a credential: the login screen needs them.
+PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/config"}
+
+
+def sub_path(path: str, root_path: str) -> str:
+    normalized = path.rstrip("/") or "/"
+    if root_path and (normalized == root_path or normalized.startswith(f"{root_path}/")):
+        normalized = normalized[len(root_path) :].rstrip("/") or "/"
+    return normalized
+
+
+def allowed_scopes(path: str) -> set[str] | None:
+    """Which scopes may reach this path (any of them); ``None`` = no extra check."""
+    if path.startswith("/api/tokens"):
+        return {"admin"}
+    if path.startswith("/api/auth"):
+        return None
+    if path.startswith("/api/agent"):
+        # agent heartbeats (agent scope) and the fleet view (pwa/admin)
+        return {"pwa", "agent", "admin"}
+    if path.startswith("/api/"):
+        return {"pwa", "admin"}
+    if path == "/agent" or path.startswith("/agent/"):
+        return {"agent"}
+    return None
 
 
 def extract_token(request: Request) -> str:
@@ -124,19 +153,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = request.url.path
         if request.method == "OPTIONS" or not is_protected_path(path, settings.root_path):
             return await call_next(request)
+        sub = sub_path(path, settings.root_path)
+        if sub in PUBLIC_API_PATHS:
+            return await call_next(request)
 
-        token = extract_token(request)
-        if not token or not (
-            hmac.compare_digest(token, settings.pwa_token)
-            or hmac.compare_digest(token, settings.agent_token)
-        ):
+        context = await resolve_token(db, settings, extract_token(request))
+        if context is None:
             return JSONResponse(
                 status_code=401,
                 content={
-                    "error": "Invalid gateway credentials",
-                    "hint": "Send Authorization: Bearer <token> or ?token=<token>",
+                    "error": "Invalid or missing credentials",
+                    "hint": "Log in at the app, or send Authorization: Bearer <token> / ?token=<token>",
                 },
             )
+
+        required = allowed_scopes(sub)
+        if required and not any(context.has(scope) for scope in required):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "This token does not have the required scope",
+                    "required": sorted(required),
+                    "granted": list(context.scopes),
+                },
+            )
+
+        request.state.auth = context
         return await call_next(request)
 
     @app.get("/healthz")
@@ -149,6 +191,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "eventBus": bus.backend,
         }
 
+    app.include_router(build_auth_router(db, settings), prefix=settings.root_path)
+    app.include_router(build_providers_router(service), prefix=settings.root_path)
     app.include_router(build_router(service, settings), prefix=settings.root_path)
     agent_router = build_agent_router(service, hub, settings)
     app.include_router(agent_router, prefix=settings.root_path)

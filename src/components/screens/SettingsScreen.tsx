@@ -1,24 +1,21 @@
 import React, { useState } from 'react';
 import type { Diagnostics, AgentInfo } from '../../types/agent';
-import { getGatewayBase, getGatewayToken, toggleAgentSimulator } from '../../services/api';
 import { PWAInstallButton } from '../PWAInstallButton';
 import { GatewayConfigCard } from '../GatewayConfigCard';
 import { AgentsCard } from '../AgentsCard';
+import { ApiKeysCard } from '../ApiKeysCard';
+import { InstallAgentCard } from '../InstallAgentCard';
+import { ProvidersCard } from '../ProvidersCard';
 import { 
   Server, 
   Laptop, 
   Cpu, 
   ShieldCheck, 
   Activity, 
-  Terminal, 
-  Copy, 
-  Check, 
   Wifi, 
   WifiOff, 
   Layers, 
   Clock, 
-  ToggleLeft, 
-  ToggleRight,
   Info
 } from 'lucide-react';
 
@@ -27,6 +24,8 @@ interface SettingsScreenProps {
   agentInfo: AgentInfo | null;
   agents: AgentInfo[];
   gatewayReachable?: boolean;
+  canManageTokens?: boolean;
+  onLogout?: () => void;
   onRefresh: () => void;
 }
 
@@ -35,39 +34,10 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   agentInfo,
   agents,
   gatewayReachable = true,
+  canManageTokens = false,
+  onLogout,
   onRefresh,
 }) => {
-  const [copiedSnippet, setCopiedSnippet] = useState(false);
-  const [isTogglingSim, setIsTogglingSim] = useState(false);
-
-  const gatewayBase = getGatewayBase() || window.location.origin;
-  const curlSnippet = `# pe MacBook (connects outbound, no inbound ports):
-python3 devagent_agent.py --env-file ~/.devagent/agent.env --check
-
-# heartbeat manual (fara executie de cod):
-curl -X POST "${gatewayBase}/api/agent/heartbeat" \
-  -H "Authorization: Bearer ${getGatewayToken() || '<DEVAGENT_TOKEN>'}" \
-  -H "Content-Type: application/json" \
-  -d '{"agentId":"macbook-pro","hostname":"$(hostname)","status":"online","workspace":"~/dev"}'`;
-
-  const handleCopySnippet = () => {
-    navigator.clipboard.writeText(curlSnippet);
-    setCopiedSnippet(true);
-    setTimeout(() => setCopiedSnippet(false), 2000);
-  };
-
-  const handleToggleSimulator = async () => {
-    setIsTogglingSim(true);
-    try {
-      await toggleAgentSimulator();
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to toggle simulator:', err);
-    } finally {
-      setIsTogglingSim(false);
-    }
-  };
-
   return (
     <div className="space-y-4 pb-12">
       {/* Header */}
@@ -78,6 +48,9 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
 
       {/* 0. Gateway URL + shared token (needed by the iOS app) */}
       <GatewayConfigCard onSaved={onRefresh} />
+
+      {/* 0b. API keys (create / revoke, like a provider dashboard) */}
+      <ApiKeysCard canManage={canManageTokens} onKeysChanged={onRefresh} />
 
       {/* 1. The worker fleet (every machine that can execute tasks) */}
       <AgentsCard agents={agents} onChanged={onRefresh} gatewayReachable={gatewayReachable} />
@@ -134,93 +107,14 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
           </div>
         </div>
 
-        {/* Worker Simulator Toggle for browser testing */}
-        <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium text-white block">Agent Worker Simulator</span>
-            <span className="text-[11px] text-zinc-400 block">
-              Simulates MacBook agent execution and live approvals in browser
-            </span>
-          </div>
-          <button
-            onClick={handleToggleSimulator}
-            disabled={isTogglingSim}
-            className={`p-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
-              agentInfo?.isSimulated
-                ? 'text-indigo-400 hover:text-indigo-300'
-                : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-            title="Toggle Agent Simulator"
-          >
-            {agentInfo?.isSimulated ? (
-              <ToggleRight className="w-7 h-7 text-indigo-500" />
-            ) : (
-              <ToggleLeft className="w-7 h-7 text-zinc-600" />
-            )}
-          </button>
-        </div>
+        {/* Worker simulator removed: only real agents execute tasks. */}
       </div>
 
-      {/* 2. Outbound Agent Connection Instructions */}
-      <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-2.5 shadow-sm">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-sky-400" />
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-white">
-              Connect Real MacBook Agent
-            </h3>
-          </div>
-          <button
-            onClick={handleCopySnippet}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
-          >
-            {copiedSnippet ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copiedSnippet ? 'Copied' : 'Copy'}</span>
-          </button>
-        </div>
+      {/* 2. Install the worker: compiled binary from GitHub Releases (macOS / Windows) */}
+      <InstallAgentCard />
 
-        <p className="text-[11px] text-zinc-400 leading-relaxed">
-          The MacBook agent connects <strong>outbound</strong> to this gateway. No public inbound ports on your MacBook are required. Run this heartbeat from your local terminal:
-        </p>
-
-        <div className="p-2.5 rounded-xl bg-black border border-zinc-800 font-mono text-[10px] text-zinc-300 overflow-x-auto whitespace-pre">
-          {curlSnippet}
-        </div>
-      </div>
-
-      {/* 3. AI Provider Configuration */}
-      <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-2.5 shadow-sm">
-        <div className="flex items-center gap-2">
-          <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400 border border-purple-500/20">
-            <Cpu className="w-4 h-4" />
-          </div>
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-white">
-              AI Provider Endpoint
-            </h3>
-            <p className="text-[11px] text-zinc-400">
-              {diagnostics?.aiProvider.provider || 'DeepSeek Proxy (Local/Private)'}
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-          <div className="p-2.5 rounded-xl bg-zinc-950/60 border border-zinc-800/60">
-            <span className="text-[10px] text-zinc-500 block uppercase">Default Model</span>
-            <span className="text-zinc-200 truncate block mt-0.5">
-              {diagnostics?.aiProvider.defaultModel || 'DeepSeek-Coder-V2.5'}
-            </span>
-          </div>
-
-          <div className="p-2.5 rounded-xl bg-zinc-950/60 border border-zinc-800/60">
-            <span className="text-[10px] text-zinc-500 block uppercase">Endpoint Status</span>
-            <span className="text-emerald-400 truncate block mt-0.5 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-              Ready & Configured
-            </span>
-          </div>
-        </div>
-      </div>
+      {/* 3. AI providers (add / edit / default; attached per task) */}
+      <ProvidersCard canManage={canManageTokens} onChanged={onRefresh} />
 
       {/* 4. Queue Diagnostics Counters */}
       <div className="p-4 rounded-2xl bg-zinc-900 border border-zinc-800 space-y-2.5 shadow-sm">
@@ -273,6 +167,16 @@ curl -X POST "${gatewayBase}/api/agent/heartbeat" \
 
       {/* 5. PWA Installation Status */}
       <PWAInstallButton variant="settings" />
+
+      {/* 6. Session */}
+      {onLogout && (
+        <button
+          onClick={onLogout}
+          className="w-full py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-xs font-medium text-rose-300 transition"
+        >
+          Sign out of this device
+        </button>
+      )}
     </div>
   );
 };

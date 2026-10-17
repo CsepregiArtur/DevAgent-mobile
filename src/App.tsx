@@ -5,6 +5,11 @@ import {
   fetchTasks, 
   fetchDiagnostics, 
   fetchWorkspaces,
+  clearSession,
+  fetchMe,
+  getGatewayToken,
+  logout,
+  setSessionToken,
   sseUrl,
 } from './services/api';
 import { Header } from './components/Header';
@@ -16,6 +21,7 @@ import { TaskDetailScreen } from './components/screens/TaskDetailScreen';
 import { ApprovalsScreen } from './components/screens/ApprovalsScreen';
 import { HistoryScreen } from './components/screens/HistoryScreen';
 import { SettingsScreen } from './components/screens/SettingsScreen';
+import { LoginScreen } from './components/screens/LoginScreen';
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 
 /** Used when the gateway cannot be reached: no agents, nothing running. */
@@ -32,6 +38,8 @@ const EMPTY_FLEET: FleetStatus = {
 };
 
 export default function App() {
+  const [sessionToken, setSessionTokenState] = useState<string>(getGatewayToken());
+  const [canManageTokens, setCanManageTokens] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
@@ -53,6 +61,15 @@ export default function App() {
     setError(null);
 
     try {
+      const me = await fetchMe().catch((err: any) => {
+        if (err?.status === 401) {
+          clearSession();
+          setSessionTokenState('');
+        }
+        return null;
+      });
+      if (me) setCanManageTokens(me.canManageTokens);
+
       const [agentRes, tasksRes, diagRes, wsRes] = await Promise.all([
         fetchAgentStatus().catch(() => EMPTY_FLEET),
         fetchTasks().catch(() => ({ tasks: [], total: 0, offset: 0, limit: 50 })),
@@ -83,6 +100,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!sessionToken) return;
     loadAllData();
 
     // Setup global SSE event listener for instant reactivity across devices
@@ -181,6 +199,33 @@ export default function App() {
     (t) => t.status === 'awaiting_approval' && t.approval?.state === 'pending'
   ).length;
 
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch {
+      /* the token may already be invalid; local cleanup is what matters */
+    }
+    clearSession();
+    setSessionTokenState('');
+    setAgents([]);
+    setAgentInfo(null);
+    setAgentConnected(false);
+    setTasks([]);
+    setDiagnostics(null);
+    setCanManageTokens(false);
+  };
+
+  if (!sessionToken) {
+    return (
+      <LoginScreen
+        onAuthenticated={() => {
+          setSessionTokenState(getGatewayToken());
+          loadAllData();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col selection:bg-indigo-500 selection:text-white">
       {/* Offline banner */}
@@ -276,6 +321,8 @@ export default function App() {
                 agentInfo={agentInfo}
                 agents={agents}
                 gatewayReachable={gatewayReachable}
+                canManageTokens={canManageTokens}
+                onLogout={handleLogout}
                 onRefresh={() => loadAllData(false)}
               />
             )}

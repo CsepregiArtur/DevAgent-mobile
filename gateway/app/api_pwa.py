@@ -13,7 +13,7 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from .config import Settings
@@ -22,7 +22,6 @@ from .models import (
     ApprovalDecisionPayload,
     CreateTaskPayload,
     HeartbeatPayload,
-    SimulatorTogglePayload,
     normalize_status,
 )
 from .service import ServiceError, TaskService
@@ -83,11 +82,7 @@ def build_router(service: TaskService, settings: Settings) -> APIRouter:
 
     @router.post("/agent/heartbeat")
     async def heartbeat(payload: HeartbeatPayload) -> dict[str, Any]:
-        """Legacy REST heartbeat - kept so existing scripts keep working.
-
-        A real agent heartbeat disables the built-in simulator: once the MacBook
-        is enrolled there is exactly one worker executing tasks.
-        """
+        """Legacy REST heartbeat - kept so existing scripts keep working."""
         await service.db.upsert_agent(
             agent_id=payload.agent_id,
             hostname=payload.hostname,
@@ -100,8 +95,6 @@ def build_router(service: TaskService, settings: Settings) -> APIRouter:
             is_simulated=False,
             mark_connected=True,
         )
-        if await service.simulator_enabled():
-            await service.set_simulator(False)
         await service.publish_agent_status()
         queued = await service.db.queued_tasks()
         return {
@@ -112,12 +105,6 @@ def build_router(service: TaskService, settings: Settings) -> APIRouter:
             "heartbeatIntervalSeconds": settings.heartbeat_interval_seconds,
             "note": "Prefer the WebSocket channel /agent/ws for task execution.",
         }
-
-    @router.post("/agent/simulate-toggle")
-    async def simulate_toggle(payload: SimulatorTogglePayload = Body(default=SimulatorTogglePayload())) -> dict[str, Any]:
-        enabled = await service.set_simulator(payload.enabled)
-        snapshot = await service.agent_status_snapshot()
-        return {"simulatorActive": enabled, "agentStatus": snapshot["status"]}
 
     # ------------------------------------------------------------------
     # tasks

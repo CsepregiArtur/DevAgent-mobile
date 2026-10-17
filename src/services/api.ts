@@ -5,6 +5,7 @@ import type {
   CreateTaskPayload,
   Diagnostics,
   FleetStatus,
+  ProviderInfo,
   Task,
   TaskApproval,
   TaskEvent,
@@ -225,16 +226,185 @@ export async function fetchWorkspaces(): Promise<{
   return handleResponse(res);
 }
 
-export async function toggleAgentSimulator(
-  enabled?: boolean
-): Promise<{ simulatorActive: boolean; agentStatus: string }> {
-  const res = await fetch(apiUrl('/api/agent/simulate-toggle'), {
+
+// ---------------------------------------------------------------------------
+// Authentication (token or admin password -> session token) and API keys
+// ---------------------------------------------------------------------------
+export interface AuthInfo {
+  tokenId: string | null;
+  name: string;
+  kind: string;
+  scopes: string[];
+  bootstrap?: boolean;
+}
+
+export interface AuthConfig {
+  passwordLogin: boolean;
+  tokenLogin: boolean;
+  sessionTtlHours: number;
+  gateway: { rootPath: string; version: string };
+}
+
+export interface ApiTokenMeta {
+  id: string;
+  name: string;
+  kind: string;
+  scopes: string[];
+  prefix: string;
+  createdAt: string | null;
+  createdBy?: string | null;
+  lastUsedAt?: string | null;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+  status: 'active' | 'revoked' | 'expired';
+  bootstrap?: boolean;
+}
+
+export function setSessionToken(token: string): void {
+  localStorage.setItem(STORAGE_TOKEN, token.trim());
+}
+
+export function clearSession(): void {
+  localStorage.removeItem(STORAGE_TOKEN);
+}
+
+export async function fetchAuthConfig(): Promise<AuthConfig> {
+  const res = await fetch(apiUrl('/api/auth/config'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function login(credentials: {
+  token?: string;
+  password?: string;
+}): Promise<{ token: string; issued: boolean; auth: AuthInfo }> {
+  const res = await fetch(apiUrl('/api/auth/login'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(credentials),
+  });
+  return handleResponse(res);
+}
+
+export async function fetchMe(): Promise<{
+  auth: AuthInfo;
+  canManageTokens: boolean;
+  canUseTasks: boolean;
+  canRunAgent: boolean;
+}> {
+  const res = await fetch(apiUrl('/api/auth/me'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function logout(): Promise<{ ok: boolean; revoked: boolean }> {
+  const res = await fetch(apiUrl('/api/auth/logout'), {
+    method: 'POST',
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function fetchTokens(): Promise<{
+  tokens: ApiTokenMeta[];
+  kinds: { kind: string; scopes: string[] }[];
+}> {
+  const res = await fetch(apiUrl('/api/tokens'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function createToken(payload: {
+  name: string;
+  kind: string;
+  expiresInDays?: number;
+}): Promise<{ token: string; warning: string; meta: ApiTokenMeta }> {
+  const res = await fetch(apiUrl('/api/tokens'), {
     method: 'POST',
     headers: authHeaders({
       'Content-Type': 'application/json',
       Accept: 'application/json',
     }),
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function revokeToken(id: string): Promise<{ revoked: string; meta: ApiTokenMeta }> {
+  const res = await fetch(apiUrl(`/api/tokens/${encodeURIComponent(id)}/revoke`), {
+    method: 'POST',
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function deleteToken(id: string): Promise<{ deleted: string }> {
+  const res = await fetch(apiUrl(`/api/tokens/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+// ---------------------------------------------------------------------------
+// AI providers (credentials stay on the gateway; masked in responses)
+// ---------------------------------------------------------------------------
+export async function fetchProviders(): Promise<{
+  providers: ProviderInfo[];
+  canManage: boolean;
+}> {
+  const res = await fetch(apiUrl('/api/providers'), {
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export type ProviderInput = {
+  name: string;
+  kind: string;
+  baseUrl: string;
+  apiKey?: string;
+  models: string[];
+  defaultModel?: string;
+  enabled?: boolean;
+};
+
+export async function createProvider(payload: ProviderInput): Promise<{ provider: ProviderInfo }> {
+  const res = await fetch(apiUrl('/api/providers'), {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function updateProvider(
+  id: string,
+  payload: Partial<ProviderInput>
+): Promise<{ provider: ProviderInfo }> {
+  const res = await fetch(apiUrl(`/api/providers/${encodeURIComponent(id)}`), {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  return handleResponse(res);
+}
+
+export async function deleteProvider(id: string): Promise<{ deleted: string }> {
+  const res = await fetch(apiUrl(`/api/providers/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: authHeaders({ Accept: 'application/json' }),
+  });
+  return handleResponse(res);
+}
+
+export async function setDefaultProvider(id: string): Promise<{ provider: ProviderInfo }> {
+  const res = await fetch(apiUrl(`/api/providers/${encodeURIComponent(id)}/default`), {
+    method: 'POST',
+    headers: authHeaders({ Accept: 'application/json' }),
   });
   return handleResponse(res);
 }

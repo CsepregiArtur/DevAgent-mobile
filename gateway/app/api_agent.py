@@ -22,13 +22,13 @@ idempotency keys (``idempotencyKey`` on checkpoints/events).
 
 from __future__ import annotations
 
-import hmac
 import json
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from .auth import resolve_token
 from .config import Settings
 from .db import utcnow
 from .hub import CLOSE_UNAUTHORIZED, AgentConnection, AgentHub
@@ -60,11 +60,10 @@ def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) 
         token: str | None = Query(default=None),
     ) -> None:
         provided = _extract_token(websocket, token)
-        expected = settings.agent_token
-        if not provided or not hmac.compare_digest(provided, expected):
-            logger.warning("agent websocket rejected: invalid token")
-            close_code = CLOSE_UNAUTHORIZED
-            await websocket.close(code=close_code, reason="Invalid agent credentials")
+        context = await resolve_token(service.db, settings, provided)
+        if context is None or not (context.has("agent") or context.has("admin")):
+            logger.warning("agent websocket rejected: invalid or insufficient token")
+            await websocket.close(code=CLOSE_UNAUTHORIZED, reason="Invalid agent credentials")
             return
 
         await websocket.accept()
@@ -227,11 +226,6 @@ async def _handle_hello(
         is_simulated=False,
         mark_connected=True,
     )
-
-    # A real agent is enrolled: the built-in simulator must stop stealing tasks.
-    if await service.simulator_enabled():
-        await service.set_simulator(False)
-        logger.info("simulator disabled because agent %s connected", agent_id)
 
     # Announce first (with the list of tasks about to be resumed), then push the
     # task_resume messages: the agent always sees the handshake before any work.

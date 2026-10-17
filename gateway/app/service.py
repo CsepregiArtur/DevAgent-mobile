@@ -33,6 +33,7 @@ from .models import (
     checkpoint_to_dict,
     event_to_dict,
     normalize_status,
+    provider_to_dict,
     task_to_dict,
 )
 
@@ -85,7 +86,6 @@ class TaskService:
         if primary is not None and status != "offline" and not self._is_live(primary):
             # Row says online but no socket is attached -> reconnecting window.
             status = "reconnecting"
-        simulated = await self.simulator_enabled()
 
         def row(agent: dict[str, Any]) -> dict[str, Any]:
             payload = agent_to_dict(agent) or {}
@@ -98,7 +98,7 @@ class TaskService:
             "status": status if live else ("online" if any(self._is_live(a) for a in ordered) else "offline"),
             "info": agent_to_dict(primary),
             "secondsSinceHeartbeat": self._heartbeat_age_seconds(primary) if primary else None,
-            "isSimulated": simulated,
+            "isSimulated": False,
             "gatewayOnline": True,
             "agents": [row(agent) for agent in ordered],
             "onlineAgents": len(live),
@@ -201,6 +201,14 @@ class TaskService:
         gates = list(payload.gates) if payload.gates else list(DEFAULT_GATES.get(payload.mode, ["diff"]))
         gates = self._normalize_gates(gates)
 
+        provider = None
+        if payload.provider_id:
+            provider = await self.db.get_provider(payload.provider_id)
+            if provider is None:
+                raise ServiceError(f"Unknown provider: {payload.provider_id}", 404)
+            if not provider["enabled"]:
+                raise ServiceError(f"Provider '{provider['name']}' is disabled", 409)
+
         target_agent = None
         if payload.agent_id:
             target_agent = await self.db.get_agent(payload.agent_id)
@@ -215,7 +223,11 @@ class TaskService:
             or (workspace_agent or {}).get("workspace")
             or self.settings.default_workspace
         )
-        model = payload.model or self.settings.default_model
+        model = (
+            payload.model
+            or (provider or {}).get("default_model")
+            or self.settings.default_model
+        )
 
         task = await self.db.create_task(
             instruction=payload.instruction,
@@ -226,6 +238,7 @@ class TaskService:
             idempotency_key=payload.idempotency_key,
             target_agent_id=target_agent["agent_id"] if target_agent else None,
             required_capabilities=payload.required_capabilities,
+            provider_id=provider["id"] if provider else None,
         )
         online = (
             self._is_live(target_agent)
@@ -251,6 +264,8 @@ class TaskService:
                 "agentOnline": online,
                 "targetAgentId": (target_agent or {}).get("agent_id"),
                 "requiredCapabilities": payload.required_capabilities or [],
+                "providerId": (provider or {}).get("id"),
+                "providerName": (provider or {}).get("name"),
             },
         )
         snapshot = await self.task_snapshot(task["id"])
@@ -455,11 +470,17 @@ class TaskService:
 
         snapshot = await self.task_snapshot(task_id)
         assert snapshot is not None
+        provider = await self._provider_for_task(task)
         delivered = await self.hub.send_to_agent(
             agent_id,
             {
                 "type": "task_assign" if action == "start" else "task_resume",
                 "task": snapshot,
+                # The provider travels with the task, not with the connection: the
+                # agent can be shared by many providers and switching one never
+                # touches the control WebSocket.
+                "provider": provider_to_dict(provider, include_secret=True),
+                "model": task.get("model"),
                 "checkpoint": checkpoint_to_dict(checkpoint) if checkpoint else None,
                 "attempt": attempt,
                 "action": action,
@@ -922,6 +943,9 @@ class TaskService:
         last checkpoint; pending approvals stay valid.
         """
         await self.db.mark_all_agents_offline()
+        # The built-in simulator was removed; clean up artifacts from older installs.
+        await self.db.delete_agent("simulated-agent")
+        await self.db.set_flag("simulator_active", False)
         now = utcnow()
         for status in ("running", "awaiting_approval"):
             tasks, _ = await self.db.list_tasks(status=status, limit=500)
@@ -941,26 +965,128 @@ class TaskService:
                     await self.db.update_task(task["id"], interrupted_at=now)
         await self.publish_agent_status()
 
-    async def simulator_enabled(self) -> bool:
-        return await self.db.get_flag("simulator_active", self.settings.simulator_enabled)
+    # ------------------------------------------------------------------
+    # AI providers
+    # ------------------------------------------------------------------
+    async def list_providers(self) -> list[dict[str, Any]]:
+        return [provider_to_dict(row) or {} for row in await self.db.list_providers()]
 
-    async def set_simulator(self, enabled: bool | None) -> bool:
-        current = await self.simulator_enabled()
-        new_value = (not current) if enabled is None else bool(enabled)
-        await self.db.set_flag("simulator_active", new_value)
-        if new_value:
-            await self.db.upsert_agent(
-                agent_id="simulated-agent",
-                hostname="gateway-simulator",
-                os_name="simulated",
-                version="v1.0.0",
-                workspace=self.settings.default_workspace,
-                status="online",
-                is_simulated=True,
-                mark_connected=True,
-            )
-            await self.publish_agent_status()
-        return new_value
+    @staticmethod
+    def _validate_provider_fields(
+        *, name: str | None = None, base_url: str | None = None, default_model: str | None = None
+    ) -> None:
+        if name is not None and not name.strip():
+            raise ServiceError("Provider name is required", 400)
+        if base_url is not None:
+            if not base_url.startswith(("http://", "https://")):
+                raise ServiceError("baseUrl must start with http:// or https://", 400)
+            if default_model is not None and not default_model.strip():
+                raise ServiceError("defaultModel cannot be blank", 400)
+
+    async def create_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name") or "").strip()
+        base_url = str(payload.get("baseUrl") or payload.get("base_url") or "").strip().rstrip("/")
+        self._validate_provider_fields(name=name, base_url=base_url)
+        kind = str(payload.get("kind") or "openai").strip().lower()
+        models = [str(m).strip() for m in (payload.get("models") or []) if str(m).strip()]
+        default_model = str(payload.get("defaultModel") or payload.get("default_model") or "").strip()
+        if not default_model and models:
+            default_model = models[0]
+        existing = {row["name"].lower() for row in await self.db.list_providers()}
+        if name.lower() in existing:
+            raise ServiceError(f"A provider named '{name}' already exists", 409)
+        row = await self.db.create_provider(
+            name=name,
+            kind=kind,
+            base_url=base_url,
+            api_key=str(payload.get("apiKey") or "").strip() or None,
+            models=models,
+            default_model=default_model or None,
+            enabled=bool(payload.get("enabled", True)),
+            is_default=bool(payload.get("isDefault", False)),
+        )
+        return provider_to_dict(row) or {}
+
+    async def update_provider(self, provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = await self.db.get_provider(provider_id)
+        if existing is None:
+            raise ServiceError("Provider not found", 404)
+        base_url = payload.get("baseUrl", payload.get("base_url"))
+        default_model = payload.get("defaultModel", payload.get("default_model"))
+        self._validate_provider_fields(
+            name=payload.get("name"),
+            base_url=str(base_url).rstrip("/") if base_url is not None else None,
+            default_model=default_model,
+        )
+        fields: dict[str, Any] = {}
+        if "name" in payload:
+            fields["name"] = str(payload["name"]).strip()
+        if "kind" in payload:
+            fields["kind"] = str(payload["kind"]).strip().lower()
+        if base_url is not None:
+            fields["base_url"] = str(base_url).strip().rstrip("/")
+        if "apiKey" in payload or "api_key" in payload:
+            raw_key = str(payload.get("apiKey", payload.get("api_key")) or "").strip()
+            fields["api_key"] = raw_key or None
+        if "models" in payload:
+            fields["models"] = [str(m).strip() for m in (payload["models"] or []) if str(m).strip()]
+        if default_model is not None:
+            fields["default_model"] = str(default_model).strip() or None
+        if "enabled" in payload:
+            fields["enabled"] = 1 if payload["enabled"] else 0
+        if "isDefault" in payload or "is_default" in payload:
+            fields["is_default"] = 1 if payload.get("isDefault", payload.get("is_default")) else 0
+        # ``api_key=None`` means "clear it", so do not let update_provider drop it
+        fields = {key: value for key, value in fields.items() if value is not None or key == "api_key"}
+        row = await self.db.update_provider(provider_id, **fields)
+        assert row is not None
+        return provider_to_dict(row) or {}
+
+    async def delete_provider(self, provider_id: str) -> None:
+        if not await self.db.delete_provider(provider_id):
+            raise ServiceError("Provider not found", 404)
+
+    async def set_default_provider(self, provider_id: str) -> dict[str, Any]:
+        provider = await self.db.get_provider(provider_id)
+        if provider is None:
+            raise ServiceError("Provider not found", 404)
+        if not provider["enabled"]:
+            raise ServiceError("Enable the provider before making it the default", 409)
+        await self.db.clear_default_provider(except_id=provider_id)
+        row = await self.db.update_provider(provider_id, is_default=1)
+        assert row is not None
+        return provider_to_dict(row) or {}
+
+    async def _provider_for_task(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        """Manual choice wins; otherwise the enabled default provider is used."""
+        provider_id = task.get("provider_id")
+        if provider_id:
+            provider = await self.db.get_provider(provider_id)
+            if provider is not None and provider["enabled"]:
+                return provider
+        return await self.db.default_provider()
+
+    async def ai_provider_summary(self) -> dict[str, Any]:
+        rows = await self.db.list_providers()
+        enabled = [row for row in rows if row["enabled"]]
+        default = next((row for row in enabled if row["is_default"]), enabled[0] if enabled else None)
+        models: list[str] = []
+        for row in enabled:
+            for model in row.get("models_json") or []:
+                if model not in models:
+                    models.append(model)
+            if row.get("default_model") and row["default_model"] not in models:
+                models.append(row["default_model"])
+        return {
+            "provider": (default or {}).get("name") or "not configured",
+            "endpoint": (default or {}).get("base_url"),
+            "endpointConfigured": bool(default),
+            "defaultModel": (default or {}).get("default_model") or self.settings.default_model,
+            "availableModels": models,
+            "status": "ready" if default else "degraded",
+            "selection": "manual" if default and default["is_default"] else "auto",
+            "providers": [provider_to_dict(row) for row in rows],
+        }
 
     # ------------------------------------------------------------------
     # diagnostics
@@ -1039,6 +1165,7 @@ class TaskService:
             },
             "queue": counts,
             "workspaces": (await self.workspaces())["workspaces"],
+            "aiProvider": await self.ai_provider_summary(),
             "protocol": {
                 "agentTransport": "websocket (agent initiated)",
                 "resume": "checkpoint based",

@@ -37,6 +37,8 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
     base = dict(
         pwa_token=TOKEN,
         agent_token=TOKEN,
+        admin_password_hash=None,
+        session_ttl_hours=12,
         root_path="/mobile",
         host="127.0.0.1",
         port=8082,
@@ -52,7 +54,6 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         deepseek_base_url="",
         default_model="DeepSeek-Coder-V2.5",
         max_events_per_task=500,
-        simulator_enabled=False,
     )
     base.update(overrides)
     return Settings(**base)
@@ -123,26 +124,8 @@ def test_diagnostics_and_workspaces(client: TestClient) -> None:
     assert workspaces["defaultWorkspace"] == "~/dev/mobile-agent-platform"
 
 
-def test_simulator_drives_the_queue_without_a_macbook(client: TestClient) -> None:
-    response = client.post("/mobile/api/agent/simulate-toggle", json={"enabled": True}, headers=AUTH)
-    assert response.json()["simulatorActive"] is True
-
-    task = create_task(client)
-    deadline = time.time() + 8
-    status = "queued"
-    while time.time() < deadline:
-        status = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]["status"]
-        if status in {"awaiting_approval", "completed"}:
-            break
-        time.sleep(0.2)
-    assert status == "awaiting_approval"
-
-    detail = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
-    approval = detail["approval"]
-    assert approval["gate"] == "diff"
-    assert approval["state"] == "pending"
-    assert [item["id"] for item in approval["items"]]
-    assert approval["items"][0]["hunks"], "per-hunk review items derived from the diff"
+# The built-in simulator was removed (the fleet is real agents only); provider
+# selection lives in tests/test_providers.py.
 
 
 # ----------------------------------------------------------------------

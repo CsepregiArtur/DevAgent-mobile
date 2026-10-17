@@ -1,0 +1,127 @@
+name: Release agent binaries
+
+# Produces the downloadable agent for macOS (Apple Silicon + Intel) and Windows.
+# Trigger: push a tag like `agent-v1.0.0`, or run it manually with a tag name.
+# The binaries are attached to a GitHub Release; the app's "Install agent" card
+# points at /releases/latest/download/<asset>.
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (created if missing), e.g. agent-v1.0.0"
+        required: true
+        default: "agent-v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14            # Apple Silicon
+            asset: devagent-agent-macos-arm64
+          - os: macos-13            # Intel (retired on some accounts -> optional)
+            asset: devagent-agent-macos-x64
+            optional: true
+          - os: windows-latest
+            asset: devagent-agent-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip pyinstaller websockets
+
+      - name: Build one-file binary
+        run: python agent/build_binary.py
+
+      - name: Rename (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          mv dist/devagent-agent "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          "$PWD/${{ matrix.asset }}" --version
+
+      - name: Rename (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item dist/devagent-agent.exe "${{ matrix.asset }}"
+          (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.asset }}" | Out-File "${{ matrix.asset }}.sha256" -Encoding ascii
+          .\${{ matrix.asset }} --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    if: always() && needs.build.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -l artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: DevAgent agent ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## DevAgent agent
+
+            Download the binary for your machine, then run the setup wizard - it asks
+            for the gateway URL, the agent token (Settings -> API keys, kind `agent`),
+            the agent id and the allowed workspace folders, and verifies the connection.
+
+            **macOS (Apple Silicon)**
+            ```sh
+            curl -L -o devagent-agent https://github.com/${{ github.repository }}/releases/latest/download/devagent-agent-macos-arm64
+            chmod +x devagent-agent
+            xattr -dr com.apple.quarantine devagent-agent   # unsigned build
+            ./devagent-agent --setup
+            ```
+
+            **macOS (Intel)**
+            ```sh
+            curl -L -o devagent-agent https://github.com/${{ github.repository }}/releases/latest/download/devagent-agent-macos-x64
+            chmod +x devagent-agent && xattr -dr com.apple.quarantine devagent-agent
+            ./devagent-agent --setup
+            ```
+
+            **Windows (PowerShell)**
+            ```powershell
+            Invoke-WebRequest -Uri https://github.com/${{ github.repository }}/releases/latest/download/devagent-agent-windows-x64.exe -OutFile devagent-agent.exe
+            .\devagent-agent.exe --setup
+            ```
+
+            Requirements on the machine: `git` (the agent creates an isolated worktree per
+            task). `gh` is optional (pull requests). The binary needs no Python.
+          files: |
+            artifacts/**
+          fail_on_unmatched_files: false

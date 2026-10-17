@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     error           TEXT,
     idempotency_key TEXT UNIQUE,
     target_agent_id TEXT,
-    required_capabilities_json TEXT
+    required_capabilities_json TEXT,
+    provider_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_events (
@@ -112,6 +113,43 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL
 );
 
+-- API tokens (the plaintext is only ever shown once, at creation time).
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    kind         TEXT NOT NULL,          -- admin | pwa | agent | session
+    scope        TEXT NOT NULL,          -- space separated scopes
+    prefix       TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    created_at   TEXT NOT NULL,
+    created_by   TEXT,
+    last_used_at TEXT,
+    expires_at   TEXT,
+    revoked_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tokens_hash ON api_tokens(token_hash);
+
+-- AI providers used by the agents (OpenAI-compatible endpoints, etc.).
+-- The gateway only stores the credential; agents receive it over the TLS
+-- WebSocket when a task is dispatched. Provider management never touches the
+-- agent <-> gateway control channel.
+CREATE TABLE IF NOT EXISTS providers (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    kind          TEXT NOT NULL DEFAULT 'openai',
+    base_url      TEXT NOT NULL,
+    api_key       TEXT,
+    models_json   TEXT,
+    default_model TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    is_default    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_providers_default ON providers(is_default, enabled);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, seq);
@@ -140,6 +178,7 @@ TASK_FIELDS = {
     "idempotency_key",
     "target_agent_id",
     "required_capabilities_json",
+    "provider_id",
 }
 
 # Columns added after the first release (applied on connect, SQLite has no
@@ -147,6 +186,7 @@ TASK_FIELDS = {
 MIGRATIONS: dict[str, str] = {
     "target_agent_id": "ALTER TABLE tasks ADD COLUMN target_agent_id TEXT",
     "required_capabilities_json": "ALTER TABLE tasks ADD COLUMN required_capabilities_json TEXT",
+    "provider_id": "ALTER TABLE tasks ADD COLUMN provider_id TEXT",
 }
 
 
@@ -260,6 +300,173 @@ class Database:
     async def set_flag(self, key: str, value: bool) -> None:
         await self.set_setting(key, "1" if value else "0")
 
+    # -- API tokens ------------------------------------------------------
+    async def create_token(
+        self,
+        *,
+        name: str,
+        kind: str,
+        scope: str,
+        prefix: str,
+        token_hash: str,
+        created_by: str | None = None,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
+        token_id = f"tok-{uuid.uuid4().hex[:10]}"
+        await self._write(
+            """
+            INSERT INTO api_tokens (id, name, kind, scope, prefix, token_hash,
+                                    created_at, created_by, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                token_id,
+                name,
+                kind,
+                scope,
+                prefix,
+                token_hash,
+                utcnow(),
+                created_by,
+                expires_at,
+            ),
+        )
+        row = await self.get_token(token_id)
+        assert row is not None
+        return row
+
+    async def get_token(self, token_id: str) -> dict[str, Any] | None:
+        return await self._fetchone("SELECT * FROM api_tokens WHERE id = ?", (token_id,))
+
+    async def list_tokens(self) -> list[dict[str, Any]]:
+        return await self._fetchall("SELECT * FROM api_tokens ORDER BY created_at DESC")
+
+    async def find_token_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        return await self._fetchone(
+            "SELECT * FROM api_tokens WHERE token_hash = ?", (token_hash,)
+        )
+
+    async def touch_token(self, token_id: str) -> None:
+        await self._write(
+            "UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (utcnow(), token_id)
+        )
+
+    async def revoke_token(self, token_id: str) -> dict[str, Any] | None:
+        await self._write(
+            "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (utcnow(), token_id),
+        )
+        return await self.get_token(token_id)
+
+    async def delete_token(self, token_id: str) -> bool:
+        existing = await self.get_token(token_id)
+        if existing is None:
+            return False
+        await self._write("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+        return True
+
+    # -- AI providers ----------------------------------------------------
+    async def create_provider(
+        self,
+        *,
+        name: str,
+        kind: str,
+        base_url: str,
+        api_key: str | None,
+        models: list[str],
+        default_model: str | None,
+        enabled: bool = True,
+        is_default: bool = False,
+    ) -> dict[str, Any]:
+        provider_id = f"prov-{uuid.uuid4().hex[:10]}"
+        now = utcnow()
+        if is_default:
+            await self.clear_default_provider()
+        await self._write(
+            """
+            INSERT INTO providers (id, name, kind, base_url, api_key, models_json,
+                                   default_model, enabled, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                provider_id,
+                name,
+                kind,
+                base_url,
+                api_key,
+                json.dumps(models),
+                default_model,
+                1 if enabled else 0,
+                1 if is_default else 0,
+                now,
+                now,
+            ),
+        )
+        row = await self.get_provider(provider_id)
+        assert row is not None
+        return row
+
+    async def get_provider(self, provider_id: str) -> dict[str, Any] | None:
+        row = await self._fetchone("SELECT * FROM providers WHERE id = ?", (provider_id,))
+        return self._decode_provider(row) if row else None
+
+    async def list_providers(self) -> list[dict[str, Any]]:
+        rows = await self._fetchall(
+            "SELECT * FROM providers ORDER BY is_default DESC, name COLLATE NOCASE ASC"
+        )
+        return [self._decode_provider(row) for row in rows]
+
+    async def update_provider(self, provider_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {
+            "name",
+            "kind",
+            "base_url",
+            "api_key",
+            "models_json",
+            "default_model",
+            "enabled",
+            "is_default",
+        }
+        updates = {key: value for key, value in fields.items() if key in allowed and value is not None}
+        if "models" in fields and fields["models"] is not None:
+            updates["models_json"] = json.dumps(fields["models"])
+        if updates.get("is_default"):
+            await self.clear_default_provider()
+        if not updates:
+            return await self.get_provider(provider_id)
+        updates["updated_at"] = utcnow()
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        await self._write(
+            f"UPDATE providers SET {assignments} WHERE id = ?",
+            (*updates.values(), provider_id),
+        )
+        return await self.get_provider(provider_id)
+
+    async def delete_provider(self, provider_id: str) -> bool:
+        existing = await self.get_provider(provider_id)
+        if existing is None:
+            return False
+        await self._write("DELETE FROM providers WHERE id = ?", (provider_id,))
+        return True
+
+    async def clear_default_provider(self, *, except_id: str | None = None) -> None:
+        if except_id:
+            await self._write(
+                "UPDATE providers SET is_default = 0 WHERE id != ?", (except_id,)
+            )
+        else:
+            await self._write("UPDATE providers SET is_default = 0")
+
+    async def default_provider(self) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            "SELECT * FROM providers WHERE enabled = 1 AND is_default = 1 LIMIT 1"
+        )
+        if row is None:
+            row = await self._fetchone(
+                "SELECT * FROM providers WHERE enabled = 1 ORDER BY created_at ASC LIMIT 1"
+            )
+        return self._decode_provider(row) if row else None
+
     # -- tasks -----------------------------------------------------------
     async def create_task(
         self,
@@ -273,6 +480,7 @@ class Database:
         idempotency_key: str | None = None,
         target_agent_id: str | None = None,
         required_capabilities: list[str] | None = None,
+        provider_id: str | None = None,
     ) -> dict[str, Any]:
         task_id = new_task_id()
         now = utcnow()
@@ -280,8 +488,8 @@ class Database:
             """
             INSERT INTO tasks (id, instruction, workspace, mode, model, status,
                                created_at, updated_at, gates_json, agent_id, idempotency_key,
-                               target_agent_id, required_capabilities_json)
-            VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                               target_agent_id, required_capabilities_json, provider_id)
+            VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -296,6 +504,7 @@ class Database:
                 idempotency_key,
                 target_agent_id,
                 json.dumps(required_capabilities or []),
+                provider_id,
             ),
         )
         task = await self.get_task(task_id)
@@ -786,4 +995,12 @@ class Database:
         row = dict(row)
         row["capabilities_json"] = _loads(row.get("capabilities_json"), [])
         row["meta_json"] = _loads(row.get("meta_json"), {})
+        return row
+
+    @staticmethod
+    def _decode_provider(row: dict[str, Any]) -> dict[str, Any]:
+        row = dict(row)
+        row["models_json"] = _loads(row.get("models_json"), [])
+        row["enabled"] = bool(row.get("enabled"))
+        row["is_default"] = bool(row.get("is_default"))
         return row

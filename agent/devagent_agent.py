@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import getpass
 import hashlib
 import json
 import logging
@@ -627,6 +628,10 @@ class TaskRunner:
         self.completed_tasks = 0
         self.failed_tasks = 0
         self.resumed_tasks = 0
+        # Per-task provider override sent by the gateway with task_assign/resume.
+        # The control connection is never affected by provider changes.
+        self._provider: dict[str, Any] | None = None
+        self._task_model: str | None = None
 
     # -- lifecycle -------------------------------------------------------
     def stats(self) -> dict[str, int]:
@@ -692,6 +697,22 @@ class TaskRunner:
         gates = message.get("gates") or ["diff"]
         LOG.info("task %s: action=%s workspace=%s gates=%s", task_id, action, workspace, gates)
         self._cancelled.discard(task_id)
+
+        provider = message.get("provider") or {}
+        self._provider = provider if provider.get("baseUrl") else None
+        self._task_model = message.get("model") or None
+        if self._provider:
+            await self.client.event(
+                task_id,
+                f"AI provider: {provider.get('name')} · model "
+                f"{self._task_model or provider.get('defaultModel') or '?'}",
+                event_type="log",
+                details={
+                    "providerId": provider.get("id"),
+                    "baseUrl": provider.get("baseUrl"),
+                    "model": self._task_model or provider.get("defaultModel"),
+                },
+            )
 
         context = await self._prepare_context(task, workspace, checkpoint, action)
         self._current = context
@@ -881,7 +902,8 @@ class TaskRunner:
         await self._apply_and_finish({}, gates)
 
     async def _generate_patch(self, context: TaskContext, instruction: str) -> str:
-        if self.config.llm_base_url:
+        provider = self._provider or {}
+        if provider.get("baseUrl") or self.config.llm_base_url:
             try:
                 return await self._llm_patch(context, instruction)
             except Exception as exc:  # noqa: BLE001 - degrade gracefully
@@ -920,7 +942,7 @@ class TaskRunner:
             + "\n\nReturn the unified diff that implements the task."
         )
         payload = {
-            "model": self.config.model,
+            "model": self._llm_model(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -929,11 +951,11 @@ class TaskRunner:
             "stream": False,
         }
         request = urllib.request.Request(
-            self.config.llm_base_url.rstrip("/") + "/chat/completions",
+            self._llm_base_url().rstrip("/") + "/chat/completions",
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.config.llm_token or ''}",
+                "Authorization": f"Bearer {self._llm_token()}",
             },
             method="POST",
         )
@@ -945,6 +967,22 @@ class TaskRunner:
             raise RuntimeError("LLM returned no usable diff")
         LOG.info("LLM generated a %d byte patch", len(diff))
         return diff
+
+    def _llm_base_url(self) -> str:
+        provider = self._provider or {}
+        return str(provider.get("baseUrl") or self.config.llm_base_url or "")
+
+    def _llm_token(self) -> str:
+        provider = self._provider or {}
+        return str(provider.get("apiKey") or self.config.llm_token or "")
+
+    def _llm_model(self) -> str:
+        provider = self._provider or {}
+        return str(
+            self._task_model
+            or provider.get("defaultModel")
+            or self.config.model
+        )
 
     def _urlopen(self, request: urllib.request.Request) -> str:
         try:
@@ -1261,12 +1299,173 @@ def load_env_file(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+        os.environ.setdefault(key.strip(), value.strip().strip('"'))
+
+
+def default_env_path() -> Path:
+    return Path(os.environ.get("DEVAGENT_ENV_FILE", Path.home() / ".devagent" / "agent.env"))
+
+
+def _ask(prompt: str, default: str = "", *, secret: bool = False) -> str:
+    suffix = f" [{default}]" if default and not secret else ""
+    question = f"{prompt}{suffix}: "
+    if secret and sys.stdin.isatty():
+        raw = getpass.getpass(question)
+    else:
+        # piped input (tests, provisioning scripts) and Windows consoles
+        raw = input(question)
+    value = raw.strip()
+    return value or default
+
+
+def _ask_bool(prompt: str, default: bool = False) -> bool:
+    raw = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes", "1", "true", "da"}
+
+
+async def _validate_connection(env: dict[str, str]) -> tuple[bool, str]:
+    """Handshake check used by the wizard (browser-like headers included)."""
+    config = Config.from_env(env)
+    runner = TaskRunner(config)
+    client = GatewayClient(config, runner)
+    try:
+        headers = client.handshake_headers()
+        kwargs: dict[str, Any] = {"open_timeout": 15, "ping_interval": None}
+        if headers:
+            kwargs["additional_headers"] = headers
+        try:
+            websocket = await websockets.connect(client.url, **kwargs)
+        except TypeError:
+            kwargs["extra_headers"] = kwargs.pop("additional_headers", {})
+            websocket = await websockets.connect(client.url, **kwargs)
+        async with websocket:
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "hostname": socket.gethostname(),
+                        "os": f"{platform.system()} {platform.release()}",
+                        "version": CLIENT_VERSION,
+                        "workspace": config.workspaces[0] if config.workspaces else "~",
+                        "capabilities": client.capabilities(),
+                    }
+                )
+            )
+            raw = await asyncio.wait_for(websocket.recv(), timeout=15)
+            message = json.loads(raw)
+            if message.get("type") == "welcome":
+                return True, f"enrolled as {message.get('agentId')}"
+            return False, f"unexpected reply: {raw[:160]}"
+    except Exception as exc:  # noqa: BLE001 - the wizard only reports it
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def run_setup(env_path: Path) -> int:
+    """Interactive first-run configuration; writes ``agent.env`` (mode 600)."""
+    print("\n=== DevAgent agent setup ===\n")
+    print("Nothing is installed yet: this wizard writes your settings file and")
+    print("then verifies that the gateway accepts this machine.\n")
+
+    existing: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                existing[key.strip()] = value.strip().strip('"')
+
+    gateway = _ask(
+        "Gateway WebSocket URL",
+        existing.get("DEVAGENT_GATEWAY_URL", "wss://deepseek-api.cs-hub.xyz/mobile/agent/ws"),
+    )
+    print("  (Settings -> API keys -> generate a key with kind 'agent')")
+    token = _ask("Agent token", existing.get("DEVAGENT_AGENT_TOKEN", ""), secret=True)
+    if not token:
+        print("A token is required to enrol this machine.")
+        return 2
+    agent_id = _ask("Agent id (unique per machine)", existing.get("DEVAGENT_AGENT_ID", socket.gethostname().split(".")[0]))
+    workspaces = _ask(
+        "Allowed workspace roots (comma separated)",
+        existing.get("DEVAGENT_WORKSPACES", str(Path.home() / "dev")),
+    )
+
+    llm_url = _ask("LLM endpoint (optional, Enter = manual plan mode)", existing.get("DEVAGENT_LLM_BASE_URL", ""))
+    llm_token = ""
+    if llm_url:
+        llm_token = _ask("LLM token", existing.get("DEVAGENT_LLM_TOKEN", ""), secret=True)
+    test_command = _ask("Test command (optional, Enter = auto-detect)", existing.get("DEVAGENT_TEST_COMMAND", ""))
+    push = _ask_bool("Push the branch after committing?", _bool(existing.get("DEVAGENT_PUSH_BRANCH"), False))
+    create_pr = push and _ask_bool("Open a pull request with gh?", _bool(existing.get("DEVAGENT_CREATE_PR"), False))
+    dry_run = _ask_bool("Dry-run mode (generate the diff but never apply)?", _bool(existing.get("DEVAGENT_DRY_RUN"), False))
+
+    values = {
+        "DEVAGENT_GATEWAY_URL": gateway,
+        "DEVAGENT_AGENT_TOKEN": token,
+        "DEVAGENT_AGENT_ID": agent_id,
+        "DEVAGENT_WORKSPACES": workspaces,
+        "DEVAGENT_STATE_DIR": existing.get("DEVAGENT_STATE_DIR", str(Path.home() / ".devagent")),
+        "DEVAGENT_HEARTBEAT_SECONDS": existing.get("DEVAGENT_HEARTBEAT_SECONDS", "10"),
+        "DEVAGENT_BROWSER_HEADERS": "true",
+        "DEVAGENT_LLM_BASE_URL": llm_url,
+        "DEVAGENT_LLM_TOKEN": llm_token,
+        "DEVAGENT_MODEL": existing.get("DEVAGENT_MODEL", "DeepSeek-Coder-V2.5"),
+        "DEVAGENT_TEST_COMMAND": test_command,
+        "DEVAGENT_PUSH_BRANCH": "true" if push else "false",
+        "DEVAGENT_CREATE_PR": "true" if create_pr else "false",
+        "DEVAGENT_DRY_RUN": "true" if dry_run else "false",
+        "DEVAGENT_APPROVE_COMMANDS": existing.get("DEVAGENT_APPROVE_COMMANDS", "true"),
+    }
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Generated by `devagent-agent --setup` - keep this file private.",
+        *[f'{key}="{value}"' for key, value in values.items() if value != ""],
+        "",
+    ]
+    env_path.write_text("\n".join(lines), encoding="utf-8")
+    with contextlib.suppress(OSError):
+        os.chmod(env_path, 0o600)
+    print(f"\nSaved {env_path}")
+
+    ok, detail = await _validate_connection(values)
+    if ok:
+        print(f"Connection OK - {detail}")
+        print("\nStart the agent with:")
+        print(f'  "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"')
+        return 0
+
+    print(f"\n[!] Could not enrol yet: {detail}")
+    if "403" in detail:
+        print("    403 usually means a proxy/CDN in front of the gateway blocked the WebSocket.")
+    elif "401" in detail:
+        print("    401 means the token is wrong, revoked or of the wrong kind (use kind 'agent').")
+    print("Fix the value above and re-run setup; the file was kept so you can edit it:")
+    print(f'  "{sys.executable}" "{Path(__file__).resolve()}" --setup')
+    return 1
+
 
 
 async def amain(args: argparse.Namespace) -> int:
+    if args.version:
+        print(f"devagent-agent {CLIENT_VERSION} ({platform.system()} {platform.release()} {platform.machine()})")
+        return 0
+
+    if args.setup:
+        return await run_setup(Path(args.env_file).expanduser())
+
     if args.env_file:
         load_env_file(Path(args.env_file).expanduser())
+
+    # First run: no settings yet and a human at the keyboard -> ask the questions.
+    env_path = Path(args.env_file).expanduser()
+    if not args.check and not env_path.exists() and sys.stdin.isatty():
+        print(f"No configuration found at {env_path}; starting the setup wizard.\n")
+        code = await run_setup(env_path)
+        if code != 0:
+            return code
+        print()
 
     config = Config.from_env()
     if args.check:
@@ -1307,8 +1506,10 @@ async def amain(args: argparse.Namespace) -> int:
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="DevAgent macOS reference agent")
-    parser.add_argument("--env-file", default=str(Path.home() / ".devagent" / "agent.env"))
+    parser.add_argument("--env-file", default=str(default_env_path()))
     parser.add_argument("--check", action="store_true", help="validate configuration and exit")
+    parser.add_argument("--setup", action="store_true", help="interactive first-run configuration")
+    parser.add_argument("--version", action="store_true", help="print the agent version")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 

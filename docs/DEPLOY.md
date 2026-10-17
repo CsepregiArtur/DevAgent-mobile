@@ -29,10 +29,14 @@ Public: **https://deepseek-api.cs-hub.xyz/mobile** (PWA) ·
 
 | Componentă | Locație | Stare |
 |---|---|---|
-| Gateway (API + coadă + stări + aprobări + WebSocket agenți) | `/opt/deepseek-proxy/devagent/gateway` | ✅ implementat, 12 teste trec |
+| Gateway (API + coadă + stări + aprobări + WebSocket agenți) | `/opt/deepseek-proxy/devagent/gateway` | ✅ implementat (35 teste automate) |
 | Protocol agent (WS + heartbeat + checkpoint + aprobare) | `app/api_agent.py`, secțiunea 7 | ✅ implementat |
 | Agent macOS de referință | `/opt/deepseek-proxy/devagent/agent/devagent_agent.py` | ✅ implementat |
 | Flotă multi-agent (mai multe laptopuri simultan) | gateway + PWA + agent | ✅ implementat (18 teste): status agregat, targetare per agent, capabilități, „forget" pentru agenții pensionați |
+| Autentificare + API keys (login, sesiuni, creare/revocare) | `app/auth.py`, `app/api_auth.py` | ✅ implementat (token hashing, scope-uri admin/pwa/agent, sesiuni din parolă) |
+| Provideri AI (CRUD + selecție auto/manuală per sarcină) | `app/api_providers.py`, UI Settings | ✅ implementat — nu atinge canalul agent ↔ gateway |
+| Simulator integrat | — | ✅ eliminat definitiv (doar agenți reali) |
+| Binare agent (macOS arm64/x64, Windows x64) | `.github/workflows/release-agent.yml` | 🟡 workflow gata; release-ul se creează la tag `agent-v*` (sau manual) |
 | PWA în `DevAgent-mobile` | `/opt/deepseek-proxy/mobile` | ✅ adaptat pentru `/mobile`, token + URL configurabil, `npm run build` OK |
 | Aplicație iOS nativă (Capacitor → Xcode) | `mobile/capacitor.config.ts`, `mobile/ios` | 🟡 Capacitor configurat în repo; proiectul Xcode se generează pe MacBook (pasul 6) |
 | Ops: Redis, systemd, regulă tunnel, backup | `devagent/systemd`, `/etc/deepseek-devagent.env` | ✅ aplicate pe VPS (Redis activ, `devagent-gateway.service`, regulă `/mobile*` în ambele tuneluri, `backup.sh` extins) |
@@ -327,6 +331,54 @@ Dev local fără build: `npm run dev` pornește serverul Express mock din repo
 
 ---
 
+### 5.4 Autentificare și API keys (ca la un furnizor)
+
+Primul ecran al aplicației este **login**. Două moduri:
+
+* **API token** — lipești o cheie `dvk_…` (generată din Settings sau din CLI);
+* **parolă de admin** — doar dacă este configurată pe server
+  (`DEVAGENT_ADMIN_PASSWORD_HASH`, generat cu `python -m app.cli hash-password`);
+  emite un token de sesiune `dvs_…` cu durată limitată (`DEVAGENT_SESSION_TTL_HOURS`, implicit 12h).
+
+În **Settings → API keys** (necesită scope `admin`) poți:
+
+| Acțiune | Efect |
+|---|---|
+| Generate (name + kind + expirare opțională) | creează o cheie `pwa` / `agent` / `admin`; **plaintext-ul e afișat o singură dată** |
+| Revoke | cheia devine imediat `401` |
+| Delete | șterge intrarea din DB |
+
+Scope-uri: `admin` (tot), `pwa` (aplicația), `agent` (workerul). Gateway-ul păstrează
+doar SHA-256 al tokenului; listele arată doar prefixul + ultima utilizare.
+Tokenurile din environment (`DEVAGENT_TOKEN`, `DEVAGENT_AGENT_TOKEN`) rămân valide ca
+**bootstrap** și nu pot fi revocate din UI (se rotesc în `/etc/deepseek-devagent.env`).
+
+```sh
+# din shell, pe server
+cd /opt/deepseek-proxy/devagent/gateway
+.venv/bin/python -m app.cli token --name iPhone-Artur --kind pwa
+.venv/bin/python -m app.cli tokens
+.venv/bin/python -m app.cli hash-password      # activează login-ul cu parolă
+```
+
+### 5.5 Provideri AI (auto sau manual, per sarcină)
+
+**Settings → AI providers** gestionează endpoint-urile LLM (OpenAI-compatible,
+Anthropic, Google, custom): nume, base URL, cheie API, listă de modele, model implicit,
+enabled/disabled, **default**.
+
+* Sarcina poate fixa un provider (`providerId`) sau poate lăsa gateway-ul să aleagă
+  **default-ul** (respectiv primul provider activ);
+* alegerea **călătorește cu sarcina** în `task_assign` / `task_resume` (inclusiv cheia,
+  peste WebSocket-ul TLS) — deci **schimbarea providerului nu afectează conexiunea
+  agent ↔ gateway**, nu reconectează nimic și nu întrerupe sarcina curentă;
+* fără niciun provider configurat, agentul folosește propriul `~/.devagent/agent.env`.
+
+> Simulatorul integrat a fost **eliminat**: coada este deservită exclusiv de agenți
+> reali. Endpoint-ul `/api/agent/simulate-toggle` nu mai există.
+
+---
+
 ## 6. Instrucțiuni: aplicația iOS (nativă prin Capacitor)
 
 Se rulează **pe MacBook** (are nevoie de Xcode); rezultatul este un proiect Xcode
@@ -390,24 +442,74 @@ aprobat”) și `status_change` pe `completed`/`failed`.
 
 ---
 
-## 7. Instrucțiuni: agentul de pe MacBook
+## 6.5 Distribuție: binare în GitHub Releases (macOS + Windows)
 
-### 7.1 Instalare
+Agentul este împachetat cu PyInstaller într-un **singur executabil** (fără Python
+pe mașina utilizatorului) și publicat în GitHub Releases de workflow-ul
+`.github/workflows/release-agent.yml`.
 
 ```sh
-mkdir -p ~/devagent ~/.devagent
-cp /opt/deepseek-proxy/devagent/agent/devagent_agent.py ~/devagent/     # sau git clone al proiectului
-cp /opt/deepseek-proxy/devagent/agent/agent.env.example ~/.devagent/agent.env
-chmod 600 ~/.devagent/agent.env
-python3 -m pip install --user websockets
+# creează release-ul + atașează binarele (necesită scope `workflow`)
+gh workflow run release-agent.yml -f tag=agent-v1.0.0
+# sau: git tag agent-v1.0.0 && git push origin agent-v1.0.0
+```
 
-# completați în ~/.devagent/agent.env:
-#   DEVAGENT_AGENT_TOKEN   (identic cu DEVAGENT_AGENT_TOKEN de pe server)
-#   DEVAGENT_WORKSPACES    (ex. /Users/artur/dev)
-#   DEVAGENT_LLM_TOKEN     (PROXY_SECRET_KEY al proxy-ului DeepSeek)
+Active produse: `devagent-agent-macos-arm64`, `devagent-agent-macos-x64`,
+`devagent-agent-windows-x64.exe` (+ `.sha256`). Aplicația le referențiază prin
+`/releases/latest/download/<asset>` (cardul **Install the agent**).
 
-python3 ~/devagent/devagent_agent.py --check       # validează configul, git, gh, workspace-uri
-python3 ~/devagent/devagent_agent.py --verbose     # rulare în prim-plan (Ctrl+C pentru oprire)
+La prima rulare, binarul pornește automat **wizard-ul** (`--setup`) dacă nu există
+fișier de configurare, întreabă: URL gateway, token de agent (Settings → API keys,
+kind `agent`), agent id, directoare de lucru, endpoint LLM (opțional), apoi scrie
+`~/.devagent/agent.env` (0600) și **verifică handshake-ul**.
+
+> Binarele nu sunt semnate: macOS afișează avertisment Gatekeeper →
+> `xattr -dr com.apple.quarantine devagent-agent`; Windows SmartScreen →
+> „More info → Run anyway".
+
+```sh
+# macOS Apple Silicon
+curl -L -o devagent-agent https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-macos-arm64
+chmod +x devagent-agent && xattr -dr com.apple.quarantine devagent-agent
+./devagent-agent --setup
+
+# Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-windows-x64.exe -OutFile devagent-agent.exe
+.\devagent-agent.exe --setup
+```
+
+---
+
+## 7. Instrucțiuni: agentul de pe MacBook
+
+### 7.1 Instalare (binar din GitHub Releases)
+
+```sh
+# macOS Apple Silicon  (Intel: devagent-agent-macos-x64)
+curl -L -o devagent-agent https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-macos-arm64
+chmod +x devagent-agent
+xattr -dr com.apple.quarantine devagent-agent   # build nesemnat
+./devagent-agent --setup                        # wizard: URL, token agent, id, workspace-uri
+
+# Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-windows-x64.exe -OutFile devagent-agent.exe
+.\devagent-agent.exe --setup
+```
+
+Wizard-ul scrie `~/.devagent/agent.env` (0600) și verifică handshake-ul. Verificări:
+
+```sh
+./devagent-agent --check      # config + git + workspaces
+./devagent-agent --version
+./devagent-agent --verbose    # rulare în prim-plan
+```
+
+Alternativa din sursă (necesită Python 3.9+ și `pip install websockets`):
+
+```sh
+mkdir -p ~/devagent && cp -r agent ~/devagent/
+cp agent/agent.env.example ~/.devagent/agent.env && chmod 600 ~/.devagent/agent.env
+python3 ~/devagent/agent/devagent_agent.py --setup
 ```
 
 ### 7.2 Pornire automată (launchd)
@@ -491,6 +593,19 @@ Toate rutele cer token: `Authorization: Bearer <DEVAGENT_TOKEN>` sau `?token=`
 
 | Metodă | Rută | Descriere |
 |---|---|---|
+| GET | `/mobile/api/auth/config` | public: dacă există login cu parolă, versiunea |
+| POST | `/mobile/api/auth/login` | `{token}` sau `{password}` → `{token, issued, auth}` |
+| GET | `/mobile/api/auth/me` | scope-uri + `canManageTokens` / `canUseTasks` / `canRunAgent` |
+| POST | `/mobile/api/auth/logout` | revocă sesiunea (`dvs_…`) |
+| GET | `/mobile/api/tokens` | chei (prefix + status, fără plaintext) — `admin` |
+| POST | `/mobile/api/tokens` | `{name, kind, expiresInDays?}` → cheia o singură dată — `admin` |
+| POST | `/mobile/api/tokens/{id}/revoke` | revocare imediată — `admin` |
+| DELETE | `/mobile/api/tokens/{id}` | ștergere — `admin` |
+| GET | `/mobile/api/providers` | provideri AI (cheia mascată) + `canManage` |
+| POST | `/mobile/api/providers` | adaugă provider — `admin` |
+| PATCH | `/mobile/api/providers/{id}` | modifică (nume, URL, cheie, modele, enabled) — `admin` |
+| POST | `/mobile/api/providers/{id}/default` | setează default (unic) — `admin` |
+| DELETE | `/mobile/api/providers/{id}` | șterge — `admin` |
 | GET | `/mobile/api/agent/status` | stare agent + `isSimulated` |
 | POST | `/mobile/api/agent/heartbeat` | heartbeat REST (compat; oprește simulatorul) |
 | POST | `/mobile/api/agent/simulate-toggle` | activează/dezactivează simulatorul |
@@ -593,25 +708,33 @@ prin urmare rămâne privată (mode 600, director 700). Metadatele includ
 
 ---
 
-## 14. Ce mai rămâne de făcut (pași manuali)
+## 14. Stare implementare și ce mai rămâne
 
-1. **Telefon / browser**: deschide `https://deepseek-api.cs-hub.xyz/mobile/` →
-   **Settings → Gateway connection** → lipește `DEVAGENT_TOKEN` din
-   `/etc/deepseek-devagent.env`, apasă **Save & test** (trebuie să scrie „Connected”),
-   apoi „Add to Home Screen”. Fără token interfața rămâne pe 401.
-2. **MacBook**: copiază agentul + `agent.env` (secțiunea 7),
-   `python3 -m pip install --user websockets`, rulează `--check`, apoi încarcă
-   `launchd` pentru pornire automată la login.
-3. **Aplicația iOS**: pe Mac, în repo-ul `mobile/`: `npm install --legacy-peer-deps`,
-   `npx cap add ios`, `npm run cap:sync`, `npm run cap:open` (Xcode). În aplicație,
-   setează URL-ul gateway-ului + tokenul din **Settings** (WKWebView rulează de pe
-   `capacitor://localhost`). Semnează cu team-ul tău și rulează pe device; apoi
-   Product → Archive → TestFlight.
-4. **Test de reconectare real**: pornește o sarcină cu propunere în așteptare, închide
-   capacul MacBook-ului (sau oprește Wi-Fi), aprobă din telefon, apoi redeschide
-   laptopul: în **History** trebuie să apară reluarea și sarcina să se finalizeze.
-5. Opțional: hostname dedicat pentru aplicație (ex. `devagent.cs-hub.xyz`) → DNS +
-   regulă nouă în ingress, dacă vrei să separi interfața de proxy-ul DeepSeek.
+### Implementat și verificat
+
+| Domeniu | Stare |
+|---|---|
+| Coadă, stări, id-uri unice, evenimente SSE (replay) | ✅ 35 teste automate |
+| Aprobări cu hash, per fișier/hunk, gate-uri multiple | ✅ |
+| Reconectare + reluare din checkpoint, watchdog, reconciliere la restart | ✅ |
+| Flotă multi-agent (targetare, capabilități, forget) | ✅ |
+| Login + API keys (hash-uri, scope-uri, sesiuni, revocare) | ✅ verificat live |
+| Provideri AI (CRUD, default, auto/manual per sarcină) | ✅ verificat live, fără impact pe WebSocket-ul agentului |
+| Simulator | ✅ eliminat (endpoint + UI + modul) |
+| PWA servit la `/mobile`, login, provideri, flotă, instalare agent | ✅ build + lint curat |
+| Agent: wizard la prima rulare, `--check/--version`, provider din sarcină | ✅ |
+| Binare macOS/Windows + release automat | 🟡 workflow gata (`release-agent.yml`) — publicarea la primul tag |
+
+### Pași rămași (manuali)
+
+1. **Publică binarele**: `gh workflow run release-agent.yml -f tag=agent-v1.0.0`
+   (sau push pe tag `agent-v*`) și verifică cele 3 asset-uri în Releases.
+2. **Telefon**: deschide `https://deepseek-api.cs-hub.xyz/mobile` → login cu token
+   bootstrap → **Settings → API keys** → generează o cheie `pwa` pentru telefon
+   (și una `agent` pentru fiecare mașină) → revocă bootstrap-ul din env când nu mai e nevoie.
+3. **Mașinile**: descarcă binarul (card **Install the agent**) → `--setup`.
+4. **iOS**: `npm run cap:sync` + `npx cap open ios` pe Mac, apoi TestFlight.
+5. Opțional: login cu parolă (`python -m app.cli hash-password` → env), hostname dedicat.
 
 ## 15. Structura proiectului
 

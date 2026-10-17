@@ -1,13 +1,11 @@
-"""Background loops: heartbeat watchdog, approval expiry, queue dispatch, simulator.
+"""Background loops: heartbeat watchdog, approval expiry and queue dispatch.
 
 Everything the gateway must do while nobody is looking lives here:
 
 * an agent that stops heartbeating is marked ``offline`` and its in-flight tasks
   are interrupted safely (queued again, resumable from checkpoint);
 * queued tasks are dispatched FIFO as soon as an agent is connected and idle;
-* pending approvals can expire after ``DEVAGENT_APPROVAL_TIMEOUT_SECONDS``;
-* the built-in simulator can drive the queue when no MacBook is connected
-  (useful to demo/test the PWA before the laptop is enrolled).
+* pending approvals can expire after ``DEVAGENT_APPROVAL_TIMEOUT_SECONDS``.
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ from .config import Settings
 from .db import Database, parse_ts, utcnow
 from .hub import AgentHub
 from .service import TaskService
-from .simulator import Simulator
 
 logger = logging.getLogger("devagent.scheduler")
 
@@ -33,7 +30,6 @@ class Scheduler:
         self.db = db
         self.hub = hub
         self.settings = settings
-        self.simulator = Simulator(service, db, settings)
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
 
@@ -67,7 +63,6 @@ class Scheduler:
         await self._heartbeat_watchdog()
         await self._expire_approvals()
         await self.service.dispatch_pending()
-        await self.simulator.tick()
 
     # -- watchdog --------------------------------------------------------
     async def _heartbeat_watchdog(self) -> None:

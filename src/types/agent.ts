@@ -133,6 +133,24 @@ export interface CreateTaskPayload {
   agentId?: string;
   /** only agents advertising these capabilities may pick the task up */
   requiredCapabilities?: string[];
+  /** AI provider for this task (undefined = gateway default) */
+  providerId?: string;
+}
+
+/** AI provider configured on the gateway (credentials never leave masked). */
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  models: string[];
+  defaultModel: string | null;
+  enabled: boolean;
+  isDefault: boolean;
+  hasApiKey: boolean;
+  apiKeyHint?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface ApprovalDecisionPayload {
@@ -162,6 +180,9 @@ export interface Diagnostics {
     defaultModel: string;
     availableModels: string[];
     status: 'ready' | 'degraded';
+    endpoint?: string | null;
+    selection?: 'auto' | 'manual' | string;
+    providers?: ProviderInfo[];
   };
   queue: {
     total: number;

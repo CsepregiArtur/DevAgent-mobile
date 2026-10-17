@@ -26,7 +26,11 @@ protocol WebSocket, troubleshooting, backup) este în [`docs/DEPLOY.md`](docs/DE
 * **stări explicite**: `queued`, `running`, `awaiting_approval` (alias `waiting_approval`), `completed`, `failed`, `cancelled`;
 * **evenimente și progres în timp real**: SSE per sarcină și global, replay după `Last-Event-ID`;
 * **aprobarea modificărilor înainte de aplicare**: propunere cu `hash` (optimistic locking, `409` la propunere expirată), granularitate per sarcină / per fișier / per hunk, mai multe gate-uri în ordine `plan → diff → apply → commit`;
-* **reconectarea agentului și reluarea sigură**: heartbeat + watchdog, sarcina întreruptă revine în coadă și se reia din ultimul checkpoint (`resume`, `await_approval`, `apply_approved`).* **flotă multi-agent**: oricâte mașini (MacBook, al doilea laptop, un Linux box) se pot conecta simultan — fiecare cu `DEVAGENT_AGENT_ID` propriu; sarcina merge la primul worker liber care satisface cerințele, sau o fixezi pe o mașină (`agentId`) / pe capabilități (`requiredCapabilities`, ex. `["pull-request"]`).
+* **reconectarea agentului și reluarea sigură**: heartbeat + watchdog, sarcina întreruptă revine în coadă și se reia din ultimul checkpoint (`resume`, `await_approval`, `apply_approved`).* **flotă multi-agent**: oricâte mașini (MacBook, al doilea laptop, Windows, Linux) se pot conecta simultan — fiecare cu `DEVAGENT_AGENT_ID` propriu; sarcina merge la primul worker liber care satisface cerințele, sau o fixezi pe o mașină (`agentId`) / pe capabilități (`requiredCapabilities`, ex. `["pull-request"]`);
+* **login + API keys**: pagina de autentificare (token sau parolă de admin), apoi administrare de chei ca la un furnizor — generezi per dispozitiv (`pwa` / `agent` / `admin`), vezi prefixul + ultima utilizare, revoci instant; gateway-ul păstrează doar hash-ul;
+* **provideri AI**: CRUD (OpenAI-compatible / Anthropic / Google / custom) cu default; selecție **automată sau manuală per sarcină** — providerul călătorește cu sarcina, deci schimbarea lui nu atinge conexiunea agent ↔ gateway.
+
+> Simulatorul de agent a fost eliminat: coada este deservită doar de agenți reali.
 ---
 
 ## Pornire rapidă
@@ -73,23 +77,29 @@ tokenul se configurează la runtime și se salvează pe dispozitiv.
 Link de configurare unică (util de pe telefon):
 `https://deepseek-api.cs-hub.xyz/mobile/?token=<DEVAGENT_TOKEN>`.
 
-### 3. Agentul de pe MacBook
+### 3. Agentul (binar din GitHub Releases)
 
 ```sh
-python3 -m pip install --user websockets
-mkdir -p ~/.devagent && cp agent/agent.env.example ~/.devagent/agent.env
-chmod 600 ~/.devagent/agent.env     # token agent, workspaces permise, endpoint LLM
-python3 agent/devagent_agent.py --check
-python3 agent/devagent_agent.py --verbose        # sau launchd: agent/com.devagent.agent.plist
+# macOS Apple Silicon (Intel: devagent-agent-macos-x64)
+curl -L -o devagent-agent https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-macos-arm64
+chmod +x devagent-agent && xattr -dr com.apple.quarantine devagent-agent
+./devagent-agent --setup
+
+# Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/CsepregiArtur/DevAgent-mobile/releases/latest/download/devagent-agent-windows-x64.exe -OutFile devagent-agent.exe
+.\devagent-agent.exe --setup
 ```
 
-Pe fiecare mașină suplimentară repeți pașii cu alt `DEVAGENT_AGENT_ID` (implicit =
-numele hostului) și **același** `DEVAGENT_AGENT_TOKEN`. Toate apar în aplicație ca o
-flotă, iar în ecranul de sarcină nouă alegi „Run on: Any idle agent" sau o mașină anume.
+Wizard-ul întreabă la prima rulare: URL gateway, token de agent (generat din
+**Settings → API keys**, kind `agent`), agent id, directoare de lucru, endpoint LLM
+(opțional) — apoi scrie `~/.devagent/agent.env` și **verifică handshake-ul**.
+Pe fiecare mașină suplimentară repeți cu alt `DEVAGENT_AGENT_ID`.
 
-> Dacă gateway-ul e publicat prin Cloudflare, agentul are nevoie de headere de browser
-> (`DEVAGENT_BROWSER_HEADERS=true`, implicit) — altfel Cloudflare răspunde `403` la
-> handshake și agentul apare offline deși procesul rulează.
+> Binarele sunt nesemnate: macOS → `xattr -dr com.apple.quarantine`; Windows →
+> SmartScreen „More info → Run anyway”.
+>
+> Din sursă (necesită Python): `python3 agent/devagent_agent.py --setup`.
+> Publicare release: `gh workflow run release-agent.yml -f tag=agent-v1.0.0`.
 
 ### 4. Test end-to-end
 
@@ -153,6 +163,16 @@ Detalii complete: [`docs/DEPLOY.md`](docs/DEPLOY.md) §9 (API) și §10 (protoco
 
 ## Stare
 
-* gateway: 12 teste automate (`pytest`) + test end-to-end cu agent real (`scripts/smoke.sh`);
-* PWA: build verificat, servit de gateway la `/mobile`, instalabilă pe telefon;
-* iOS: proiectul nativ se generează cu Capacitor pe un Mac cu Xcode (`npx cap add ios`).
+**Implementat și verificat**
+
+* gateway: coadă/stări/id-uri, evenimente SSE, aprobări cu hash (per fișier/hunk), reluare din checkpoint, watchdog, flotă multi-agent, login + API keys, provideri AI — **35 teste automate** + smoke test cu agent real;
+* PWA: login, flotă, provideri, API keys, instalare agent (macOS/Windows), Capacitor pentru iOS;
+* agent: wizard la prima rulare, `--check/--version`, worktree izolat, provider primit per sarcină; PyInstaller + workflow de release.
+
+**Rămas**
+
+* publicarea primelor binare (tag `agent-v*`);
+* semnare/notarizare macOS + certificat Windows (opțional, elimină avertismentele);
+* proiectul Xcode (`npx cap add ios`) + TestFlight.
+
+**Eliminat:** simulatorul de agent (UI + endpoint + modul).

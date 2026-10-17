@@ -49,6 +49,8 @@ class Settings:
 
     pwa_token: str
     agent_token: str
+    admin_password_hash: str | None
+    session_ttl_hours: int
     root_path: str
     host: str
     port: int
@@ -64,7 +66,6 @@ class Settings:
     deepseek_base_url: str
     default_model: str
     max_events_per_task: int
-    simulator_enabled: bool
 
     # -- derived helpers -------------------------------------------------
     @property
@@ -102,6 +103,9 @@ class Settings:
         return Settings(
             pwa_token=pwa_token,
             agent_token=agent_token,
+            # Optional password login (hash generated with `python -m app.cli hash-password`).
+            admin_password_hash=_env("DEVAGENT_ADMIN_PASSWORD_HASH"),
+            session_ttl_hours=_env_int("DEVAGENT_SESSION_TTL_HOURS", 12),
             root_path=root_path,
             host=_env("DEVAGENT_HOST", "127.0.0.1") or "127.0.0.1",
             port=_env_int("DEVAGENT_PORT", 8082),
@@ -118,5 +122,4 @@ class Settings:
             or "",
             default_model=_env("DEVAGENT_DEFAULT_MODEL", "DeepSeek-Coder-V2.5") or "",
             max_events_per_task=_env_int("DEVAGENT_MAX_EVENTS_PER_TASK", 500),
-            simulator_enabled=_env_bool("DEVAGENT_SIMULATOR", False),
         )
