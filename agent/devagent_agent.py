@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.1.0"
+CLIENT_VERSION = "v1.1.1"
 
 
 # ----------------------------------------------------------------------
@@ -126,6 +126,99 @@ def _launch_command(env_path: Path) -> str:
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}" --env-file "{env_path}"'
     return f'"{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"'
+
+
+def _service_program(env_path: Path) -> list[str]:
+    """argv launchd/systemd should run (no shell, absolute paths)."""
+    # Keep the venv interpreter as-is: resolving the symlink would drop its packages.
+    argv = [str(Path(sys.executable))]
+    if not getattr(sys, "frozen", False):
+        argv.append(str(Path(__file__).resolve()))
+    argv.extend(["--env-file", str(env_path)])
+    return argv
+
+
+def install_service(env_path: Path) -> int:
+    """Write + load a login service: launchd (macOS), systemd user (Linux)."""
+    from xml.sax.saxutils import escape
+
+    argv = _service_program(env_path)
+    state_dir = Path.home() / ".devagent"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    system = platform.system()
+
+    if system == "Darwin":
+        label = "com.devagent.agent"
+        target = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        arguments = "".join(f"\n        <string>{escape(arg)}</string>" for arg in argv)
+        target.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n<dict>\n'
+            f"    <key>Label</key>\n    <string>{label}</string>\n"
+            f"    <key>ProgramArguments</key>\n    <array>{arguments}\n    </array>\n"
+            "    <key>RunAtLoad</key>\n    <true/>\n"
+            "    <key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>\n    </dict>\n"
+            "    <key>ThrottleInterval</key>\n    <integer>15</integer>\n"
+            f"    <key>StandardOutPath</key>\n    <string>{escape(str(state_dir / 'agent.out.log'))}</string>\n"
+            f"    <key>StandardErrorPath</key>\n    <string>{escape(str(state_dir / 'agent.err.log'))}</string>\n"
+            "    <key>ProcessType</key>\n    <string>Background</string>\n"
+            "</dict>\n</plist>\n",
+            encoding="utf-8",
+        )
+        domain = f"gui/{os.getuid()}"
+        print(f"wrote {target}")
+        for command in (
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            ["launchctl", "bootstrap", domain, str(target)],
+            ["launchctl", "kickstart", "-k", f"{domain}/{label}"],
+        ):
+            result = subprocess.run(command, capture_output=True, text=True)
+            state = "ok" if result.returncode == 0 else f"exit {result.returncode}"
+            print(f"  {' '.join(command)} -> {state}")
+            if result.returncode != 0 and "bootstrap" in command:
+                print(f"    {result.stderr.strip() or result.stdout.strip()}")
+        print(f"logs: tail -f {state_dir / 'agent.out.log'} {state_dir / 'agent.err.log'}")
+        print(f"stop: launchctl bootout {domain}/{label}")
+        print(f"start: launchctl bootstrap {domain} {target}")
+        return 0
+
+    if system == "Linux":
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit = unit_dir / "devagent-agent.service"
+        unit.write_text(
+            "[Unit]\nDescription=DevAgent worker\nAfter=network-online.target\n\n"
+            "[Service]\n"
+            f"ExecStart={' '.join(argv)}\n"
+            "Restart=always\nRestartSec=15\n"
+            f"StandardOutput=append:{state_dir / 'agent.out.log'}\n"
+            f"StandardError=append:{state_dir / 'agent.err.log'}\n\n"
+            "[Install]\nWantedBy=default.target\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {unit}")
+        for command in (
+            ["systemctl", "--user", "daemon-reload"],
+            ["systemctl", "--user", "enable", "--now", "devagent-agent"],
+        ):
+            result = subprocess.run(command, capture_output=True, text=True)
+            state = "ok" if result.returncode == 0 else f"exit {result.returncode}"
+            print(f"  {' '.join(command)} -> {state}")
+        print("hint: run `loginctl enable-linger $USER` so it also starts without a login")
+        return 0
+
+    if system == "Windows":
+        command = (
+            f'schtasks /Create /F /SC ONLOGON /TN DevAgent /TR "{" ".join(argv)}"'
+        )
+        print("run this in an elevated PowerShell:\n  " + command)
+        return 0
+
+    print(f"unsupported platform: {system}", file=sys.stderr)
+    return 2
 
 
 # ----------------------------------------------------------------------
@@ -1779,10 +1872,8 @@ Dry-run: generate the diff but never apply it (useful for a first try).
         print("  1) keep it running in the foreground to watch it:")
         print(f"       {launch} --verbose")
         print("     run it at login:")
-        print("       macOS   → launchd (agent/com.devagent.agent.plist)")
-        print("       Linux   → systemd unit (see docs/DEPLOY.md)")
-        print("       Windows → Task Scheduler at logon, action:")
-        print(f"       {launch}")
+        print("       macOS/Linux → ./devagent-agent --install-service   (launchd / systemd --user)")
+        print("       Windows     → schtasks /Create /SC ONLOGON /TN DevAgent /TR \"<bin> --env-file <env>\"")
         print("  2) open the app → Dashboard: this machine appears in the fleet within ~2s")
         print("  3) New Task → 'Run on' → pick this machine (or leave it on any idle agent)")
         return 0
@@ -1825,6 +1916,13 @@ async def amain(args: argparse.Namespace) -> int:
     if args.setup:
         return await run_setup(Path(args.env_file).expanduser())
 
+    if args.install_service:
+        env_path = Path(args.env_file).expanduser()
+        if not env_path.exists():
+            print(f"No configuration at {env_path} — run --setup first.", file=sys.stderr)
+            return 2
+        return install_service(env_path)
+
     if args.env_file:
         load_env_file(Path(args.env_file).expanduser())
 
@@ -1848,6 +1946,12 @@ async def amain(args: argparse.Namespace) -> int:
         print(f"  llm endpoint : {config.llm_base_url or '(not configured: manual plan mode)'}")
         print(f"  git          : {which('git') or 'MISSING'}")
         print(f"  gh           : {which('gh') or '(not installed, PRs disabled)'}")
+        if config.test_command:
+            head = shlex.split(config.test_command)[0] if config.test_command.strip() else ""
+            status = "ok" if which(head) else "NOT FOUND — leave empty for auto-detect"
+            print(f"  test command : {config.test_command} ({status})")
+        else:
+            print("  test command : auto-detect")
         print(f"  python       : {sys.version.split()[0]} on {platform.system()} {platform.release()}")
         for workspace in config.workspaces:
             root = Path(workspace).expanduser()
@@ -1880,6 +1984,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--env-file", default=str(default_env_path()))
     parser.add_argument("--check", action="store_true", help="validate configuration and exit")
     parser.add_argument("--setup", action="store_true", help="interactive first-run configuration")
+    parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help="start at login (launchd on macOS, systemd --user on Linux)",
+    )
     parser.add_argument("--version", action="store_true", help="print the agent version")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
