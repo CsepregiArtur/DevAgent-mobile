@@ -382,6 +382,20 @@ enabled/disabled, **default**.
   agent ↔ gateway**, nu reconectează nimic și nu întrerupe sarcina curentă;
 * fără niciun provider configurat, agentul folosește propriul `~/.devagent/agent.env`.
 
+**Lista de modele se ia direct de la provider** — `GET /mobile/api/providers/{id}/models`
+cheamă `{baseUrl}/models` cu cheia providerului, cache-uiește răspunsul 6 ore
+(`refresh=true` o forțează) și îl contopește cu numele configurate (aliasuri care
+funcționează în continuare). Ecranul **New Task** afișează lista live și are un buton de
+refresh, deci un model nou apare fără update de aplicație:
+
+```sh
+curl -s -H "Authorization: Bearer $DEVAGENT_TOKEN" \
+  "http://127.0.0.1:8082/mobile/api/providers/<id>/models?refresh=true" | jq .
+# {"models":["deepseek-flash","deepseek-v4-pro","deepseek-chat","deepseek-reasoner"],
+#  "live":["deepseek-flash","deepseek-v4-pro"],"source":"live", ...}
+```
+
+
 > Simulatorul integrat a fost **eliminat**: coada este deservită exclusiv de agenți
 > reali. Endpoint-ul `/api/agent/simulate-toggle` nu mai există.
 

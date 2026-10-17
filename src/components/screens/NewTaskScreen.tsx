@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { AgentInfo, ProviderInfo, TaskMode, CreateTaskPayload } from '../../types/agent';
-import { createTask, ApiError, fetchProviders } from '../../services/api';
+import { createTask, ApiError, fetchProviders, fetchProviderModels } from '../../services/api';
 import { 
   Send, 
   X, 
@@ -12,6 +12,7 @@ import {
   CheckCircle2, 
   Loader2,
   Laptop,
+  RefreshCw,
   WifiOff
 } from 'lucide-react';
 
@@ -36,18 +37,64 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
   const [instruction, setInstruction] = useState('');
   const [workspace, setWorkspace] = useState(defaultWorkspace || workspaces[0] || '~/dev/mobile-agent-platform');
   const [mode, setMode] = useState<TaskMode>('supervised');
-  const [model, setModel] = useState('DeepSeek-Coder-V2.5');
+  const [model, setModel] = useState('');
   const [targetAgentId, setTargetAgentId] = useState<string>('');
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerId, setProviderId] = useState<string>('');
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsSource, setModelsSource] = useState<'live' | 'config' | 'none'>('none');
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchProviders()
-      .then((data) => setProviders((data.providers || []).filter((provider) => provider.enabled)))
+      .then((data) => {
+        const enabled = (data.providers || []).filter((provider) => provider.enabled);
+        setProviders(enabled);
+        // Pre-select the gateway default so the model list can be fetched.
+        setProviderId((current) =>
+          current || (enabled.find((provider) => provider.isDefault) || enabled[0])?.id || '',
+        );
+      })
       .catch(() => setProviders([]));
   }, []);
+
+  // Models come from the provider itself (GET {baseUrl}/models), so a new model
+  // shows up without an app update. The gateway caches the answer for a few hours.
+  const loadModels = React.useCallback(
+    (refresh = false) => {
+      if (!providerId) {
+        setModels([]);
+        setModelsSource('none');
+        return;
+      }
+      setModelsLoading(true);
+      fetchProviderModels(providerId, refresh)
+        .then((data) => {
+          setModels(data.models || []);
+          setModelsSource(data.source);
+          setModelsError(data.error ?? null);
+          setModel((current) =>
+            (data.models || []).includes(current)
+              ? current
+              : data.defaultModel || data.models?.[0] || '',
+          );
+        })
+        .catch((err) => {
+          setModels([]);
+          setModelsSource('none');
+          setModelsError(err?.message || 'Could not list models');
+        })
+        .finally(() => setModelsLoading(false));
+    },
+    [providerId],
+  );
+
+  useEffect(() => {
+    loadModels();
+  }, [loadModels]);
 
   const onlineAgents = agents.filter((agent) => agent.online);
 
@@ -288,22 +335,47 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
           </div>
         </div>
 
-        {/* Model Selection */}
+        {/* Model Selection (loaded from the provider, not hardcoded) */}
         <div className="space-y-1.5">
-          <label className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-            <Cpu className="w-3.5 h-3.5 text-zinc-500" />
-            <span>AI Model Engine</span>
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+              <Cpu className="w-3.5 h-3.5 text-zinc-500" />
+              <span>AI Model Engine</span>
+            </label>
+            <button
+              type="button"
+              onClick={() => loadModels(true)}
+              disabled={isSubmitting || modelsLoading || !providerId}
+              className="text-[10px] font-mono text-zinc-400 hover:text-white flex items-center gap-1 disabled:opacity-50 transition"
+              title="Re-read the model list from the provider"
+            >
+              <RefreshCw className={`w-3 h-3 ${modelsLoading ? 'animate-spin' : ''}`} />
+              {modelsSource === 'live' ? 'live' : modelsSource === 'config' ? 'configured' : 'refresh'}
+            </button>
+          </div>
           <select
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            disabled={isSubmitting}
-            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition"
+            disabled={isSubmitting || modelsLoading || models.length === 0}
+            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition disabled:opacity-60"
           >
-            <option value="DeepSeek-Coder-V2.5">DeepSeek-Coder-V2.5 (Recommended)</option>
-            <option value="DeepSeek-V3">DeepSeek-V3 (Reasoning & Architecture)</option>
-            <option value="Claude-3.5-Sonnet">Claude-3.5-Sonnet (Proxy Fallback)</option>
+            {models.length === 0 && (
+              <option value="">{modelsLoading ? 'Loading models…' : 'No models available'}</option>
+            )}
+            {models.map((entry) => (
+              <option key={entry} value={entry}>
+                {entry}
+                {entry === providers.find((p) => p.id === providerId)?.defaultModel ? ' (default)' : ''}
+              </option>
+            ))}
           </select>
+          <p className="text-[10px] text-zinc-500">
+            {modelsError
+              ? `Provider did not answer /models (${modelsError}); showing configured names.`
+              : modelsSource === 'live'
+                ? 'Fetched live from the provider — new models appear automatically.'
+                : 'Names configured in Settings → AI providers.'}
+          </p>
         </div>
 
         {/* Form Actions */}

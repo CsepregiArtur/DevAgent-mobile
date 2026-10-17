@@ -409,6 +409,30 @@ export async function setDefaultProvider(id: string): Promise<{ provider: Provid
   return handleResponse(res);
 }
 
+export interface ProviderModels {
+  providerId: string;
+  models: string[];
+  live: string[];
+  configured: string[];
+  defaultModel?: string;
+  source: 'live' | 'config';
+  fetchedAt: string;
+  error?: string;
+}
+
+/** Live model list for a provider (gateway caches it for a few hours). */
+export async function fetchProviderModels(
+  id: string,
+  refresh = false,
+): Promise<ProviderModels> {
+  const query = refresh ? '?refresh=true' : '';
+  const res = await fetch(
+    apiUrl(`/api/providers/${encodeURIComponent(id)}/models${query}`),
+    { headers: authHeaders({ Accept: 'application/json' }) },
+  );
+  return handleResponse(res);
+}
+
 // SSE Connection manager with automatic reconnection, heartbeat tracking, and deduplication
 export function subscribeToTaskEvents(
   taskId: string,

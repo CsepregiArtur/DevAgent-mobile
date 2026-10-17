@@ -16,9 +16,14 @@ Guarantees implemented here (mapped to the product requirements):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import json
 import logging
+import time
 from typing import Any, Iterable
+
+import httpx
 
 from .config import Settings
 from .db import Database, parse_ts, utcnow
@@ -1092,6 +1097,88 @@ class TaskService:
             if provider is not None and provider["enabled"]:
                 return provider
         return await self.db.default_provider()
+
+    # -- model discovery -------------------------------------------------
+    MODELS_CACHE_TTL_SECONDS = 6 * 3600
+
+    async def provider_models(self, provider_id: str, *, refresh: bool = False) -> dict[str, Any]:
+        """Live model list (``GET {base}/models``), merged with the configured ones.
+
+        The list is cached for a few hours so the app can show new models without
+        hitting the provider on every screen render.
+        """
+        provider = await self.db.get_provider(provider_id)
+        if provider is None:
+            raise ServiceError("Provider not found", 404)
+        cache_key = f"models:{provider_id}"
+        if not refresh:
+            raw = await self.db.get_setting(cache_key)
+            if raw:
+                with contextlib.suppress(ValueError):
+                    cached = json.loads(raw)
+                    if time.time() - float(cached.get("cachedAt", 0)) < self.MODELS_CACHE_TTL_SECONDS:
+                        return cached
+
+        configured = list(provider.get("models_json") or [])
+        live, error = await self._fetch_live_models(provider)
+        models = list(dict.fromkeys([*live, *configured]))
+        payload: dict[str, Any] = {
+            "providerId": provider_id,
+            "models": models,
+            "live": live,
+            "configured": configured,
+            "defaultModel": provider.get("default_model"),
+            "source": "live" if live else "config",
+            "fetchedAt": utcnow(),
+            "cachedAt": time.time(),
+        }
+        if error:
+            payload["error"] = error
+        if live:
+            with contextlib.suppress(Exception):
+                await self.db.set_setting(cache_key, json.dumps(payload))
+        return payload
+
+    async def _fetch_live_models(
+        self, provider: dict[str, Any]
+    ) -> tuple[list[str], str | None]:
+        base = (provider.get("base_url") or "").rstrip("/")
+        key = provider.get("api_key") or ""
+        if not base or not key:
+            return [], "provider has no base URL or API key"
+        url = f"{base}/models"
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Accept": "application/json",
+                        "User-Agent": "Mozilla/5.0 (compatible; DevAgent-Gateway)",
+                    },
+                )
+            if response.status_code != 200:
+                return [], f"HTTP {response.status_code}"
+            data = response.json()
+        except Exception as exc:  # noqa: BLE001 - reported to the app
+            return [], f"{type(exc).__name__}: {exc}"
+
+        entries: Any = data
+        if isinstance(data, dict):
+            entries = data.get("data") or data.get("models") or []
+        if not isinstance(entries, list):
+            return [], "unexpected /models payload"
+        ids: list[str] = []
+        for entry in entries:
+            if isinstance(entry, str):
+                value = entry
+            elif isinstance(entry, dict):
+                value = entry.get("id") or entry.get("name") or entry.get("model")
+            else:
+                continue
+            if isinstance(value, str) and value and value not in ids:
+                ids.append(value)
+        return ids, None
 
     async def ai_provider_summary(self) -> dict[str, Any]:
         rows = await self.db.list_providers()

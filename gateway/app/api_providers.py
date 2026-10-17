@@ -92,4 +92,15 @@ def build_router(service: TaskService) -> APIRouter:
             raise _raise(error) from error
         return {"provider": provider}
 
+    @router.get("/providers/{provider_id}/models")
+    async def provider_models(
+        request: Request, provider_id: str, refresh: bool = False
+    ) -> dict[str, Any]:
+        """Live model list for the provider (merged with the configured aliases)."""
+        _auth(request)
+        try:
+            return await service.provider_models(provider_id, refresh=refresh)
+        except ServiceError as error:
+            raise _raise(error) from error
+
     return router

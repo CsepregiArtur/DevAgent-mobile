@@ -181,3 +181,31 @@ def test_simulator_is_gone(client: TestClient) -> None:
     status = client.get("/mobile/api/agent/status", headers=AUTH).json()
     assert status["isSimulated"] is False
     assert "simulatorActive" not in status
+
+
+def test_provider_models_merges_live_and_configured(client: TestClient, monkeypatch) -> None:
+    """The app lists the provider's own /models answer, cached, plus the configured aliases."""
+    from app.service import TaskService
+
+    created = client.post("/mobile/api/providers", json=fake_provider(), headers=AUTH)
+    provider_id = created.json()["provider"]["id"]
+
+    async def fake_live(self, provider: dict) -> tuple[list[str], str | None]:
+        return ["deepseek-v5", "deepseek-flash"], None
+
+    monkeypatch.setattr(TaskService, "_fetch_live_models", fake_live)
+    response = client.get(f"/mobile/api/providers/{provider_id}/models", headers=AUTH)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == "live"
+    assert data["models"][:2] == ["deepseek-v5", "deepseek-flash"]
+    assert {"DeepSeek-Coder-V2.5", "DeepSeek-V3"}.issubset(set(data["models"]))
+    assert data["defaultModel"] == "DeepSeek-Coder-V2.5"
+
+    # second call is served from the cache (no extra provider round-trip)
+    async def boom(self, provider: dict) -> tuple[list[str], str | None]:
+        raise AssertionError("must not be called again")
+
+    monkeypatch.setattr(TaskService, "_fetch_live_models", boom)
+    cached = client.get(f"/mobile/api/providers/{provider_id}/models", headers=AUTH).json()
+    assert cached["models"] == data["models"]
