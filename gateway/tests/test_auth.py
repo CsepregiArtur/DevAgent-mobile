@@ -147,6 +147,31 @@ def test_agent_key_opens_the_websocket_but_not_the_admin_api(client: TestClient)
     assert heartbeat.status_code == 200
 
 
+def test_agent_websocket_explains_a_wrong_key_kind(client: TestClient) -> None:
+    """A PWA key must not reach the agent channel — and the client must hear why.
+
+    Starlette turns a ``close()`` before ``accept()`` into an opaque HTTP 403, which
+    is what the setup wizard used to print. The gateway now accepts, sends an
+    ``error`` frame and closes with 1008.
+    """
+    created = client.post("/mobile/api/tokens", json={"name": "iphone", "kind": "pwa"}, headers=AUTH)
+    secret = created.json()["token"]
+
+    with client.websocket_connect(f"/mobile/agent/ws?token={secret}&agentId=mbp") as websocket:
+        payload = websocket.receive_json()
+        assert payload["type"] == "error"
+        assert payload["code"] == "wrong_token_kind"
+        assert payload["kind"] == "pwa"
+        assert "agent" in payload["message"]
+
+
+def test_agent_websocket_explains_an_unknown_key(client: TestClient) -> None:
+    with client.websocket_connect("/mobile/agent/ws?token=dvk_nope&agentId=mbp") as websocket:
+        payload = websocket.receive_json()
+        assert payload["type"] == "error"
+        assert payload["code"] == "invalid_credentials"
+
+
 def test_bootstrap_tokens_cannot_be_revoked_from_the_api(client: TestClient) -> None:
     response = client.post("/mobile/api/tokens/bootstrap/revoke", headers=AUTH)
     assert response.status_code == 409

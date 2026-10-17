@@ -22,6 +22,7 @@ idempotency keys (``idempotencyKey`` on checkpoints/events).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import Any
@@ -53,6 +54,29 @@ SUPPORTED_AGENT_MESSAGE_TYPES = {
 def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) -> APIRouter:
     router = APIRouter(tags=["agent"])
 
+    async def _reject(
+        websocket: WebSocket,
+        code: str,
+        message: str,
+        *,
+        reason: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Tell the client *why* before closing.
+
+        Starlette answers an HTTP 403 to a ``close()`` issued before ``accept()``,
+        which reaches the client as an opaque ``InvalidStatus: HTTP 403``. Accepting
+        first lets us send a readable error frame (the wizard prints it verbatim).
+        """
+        await websocket.accept()
+        payload: dict[str, Any] = {"type": "error", "code": code, "message": message}
+        if extra:
+            payload.update(extra)
+        with contextlib.suppress(Exception):
+            await websocket.send_json(payload)
+        await websocket.close(code=CLOSE_UNAUTHORIZED, reason=reason)
+
+
     @router.websocket("/agent/ws")
     async def agent_ws(
         websocket: WebSocket,
@@ -61,9 +85,28 @@ def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) 
     ) -> None:
         provided = _extract_token(websocket, token)
         context = await resolve_token(service.db, settings, provided)
-        if context is None or not (context.has("agent") or context.has("admin")):
-            logger.warning("agent websocket rejected: invalid or insufficient token")
-            await websocket.close(code=CLOSE_UNAUTHORIZED, reason="Invalid agent credentials")
+        if context is None:
+            logger.warning("agent websocket rejected: invalid or revoked token")
+            await _reject(
+                websocket,
+                "invalid_credentials",
+                "Unknown, expired or revoked key. Generate a new one: app → Settings → "
+                "API keys → kind 'agent' → Generate.",
+                reason="Invalid agent credentials",
+            )
+            return
+        if not (context.has("agent") or context.has("admin")):
+            logger.warning(
+                "agent websocket rejected: token kind=%s scopes=%s", context.kind, context.scopes
+            )
+            await _reject(
+                websocket,
+                "wrong_token_kind",
+                f"That key is of kind '{context.kind}', but the agent channel needs kind "
+                "'agent'. Create one in the app: Settings → API keys → kind 'agent'.",
+                reason="Wrong key kind",
+                extra={"kind": context.kind, "granted": list(context.scopes)},
+            )
             return
 
         await websocket.accept()

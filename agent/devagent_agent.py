@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.0.2"
+CLIENT_VERSION = "v1.0.3"
 
 
 # ----------------------------------------------------------------------
@@ -1426,7 +1426,12 @@ async def _validate_connection(env: dict[str, str]) -> tuple[bool, str]:
             message = json.loads(raw)
             if message.get("type") == "welcome":
                 return True, f"enrolled as {message.get('agentId')}"
+            if message.get("type") == "error":
+                detail = message.get("message") or message.get("code") or raw[:160]
+                return False, str(detail)
             return False, f"unexpected reply: {raw[:160]}"
+    except ConnectionClosed as exc:  # server closed right after an error frame
+        return False, f"connection closed (code {exc.code}): {exc.reason or 'no reason given'}"
     except Exception as exc:  # noqa: BLE001 - the wizard only reports it
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -1491,6 +1496,7 @@ Generate a key for THIS machine in the app:
    Settings → API keys → name: mbp-yourname · kind: agent → Generate
 Copy the dvk_… value immediately (it is shown only once) and paste it here.
 One key per machine is best: you can revoke a single machine later.
+The key used to log in to the app (kind 'pwa') is NOT accepted here.
         """
     )
     token = _ask("Agent API key (dvk_…)", existing.get("DEVAGENT_AGENT_TOKEN", ""), secret=True)
@@ -1624,8 +1630,12 @@ Dry-run: generate the diff but never apply it (useful for a first try).
         return 0
 
     print(f"\n⚠️  Could not enrol yet: {detail}")
-    if "403" in detail:
-        print("    403 = a proxy/CDN in front of the gateway blocked the WebSocket.")
+    if "wrong_token_kind" in detail or "kind '" in detail:
+        print("    This key belongs to the app (kind 'pwa'), not to an agent.")
+        print("    Create a separate key: Settings → API keys → kind 'agent' → Generate.")
+    elif "403" in detail:
+        print("    403 = the gateway refused the key: wrong kind (must be 'agent'), revoked or")
+        print("    expired — or a proxy/CDN in front of the gateway blocked the WebSocket.")
     elif "401" in detail:
         print("    401 = the key is wrong, revoked, or of the wrong kind (must be `agent`).")
     elif "getaddrinfo" in detail or "Name or service" in detail:
