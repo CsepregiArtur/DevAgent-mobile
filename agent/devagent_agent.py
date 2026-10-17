@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.1.2"
+CLIENT_VERSION = "v1.1.3"
 
 
 # ----------------------------------------------------------------------
@@ -333,6 +333,25 @@ async def run_command(
 
 def which(binary: str) -> str | None:
     return shutil.which(binary)
+
+
+def _command_available(command: str, cwd: Path | None = None) -> bool:
+    """True when the first word of ``command`` can actually be executed here."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:  # unbalanced quotes: let the shell report it
+        return True
+    if not parts:
+        return False
+    head = parts[0]
+    if head in {"cd", "echo", "export", "source", ".", "true", "false"}:
+        return True
+    if which(head) is not None:
+        return True
+    candidate = Path(head).expanduser()
+    if not candidate.is_absolute() and cwd is not None:
+        candidate = cwd / candidate
+    return candidate.exists()
 
 
 def detect_test_command(worktree: Path) -> str | None:
@@ -1470,7 +1489,18 @@ class TaskRunner:
             await self.client.result(task_id, "completed", result=result)
 
     async def _run_tests(self, context: TaskContext) -> tuple[bool | None, str]:
-        command = self.config.test_command or detect_test_command(context.worktree)
+        command = (self.config.test_command or "").strip()
+        if command and not _command_available(command, context.worktree):
+            fallback = detect_test_command(context.worktree)
+            await self.client.event(
+                context.task_id,
+                f"Test command '{command}' is not installed on this machine"
+                + (f"; using the detected runner '{fallback}'." if fallback else "; skipping verification."),
+                event_type="log",
+                details={"configured": command, "fallback": fallback},
+            )
+            command = fallback or ""
+        command = command or detect_test_command(context.worktree)
         if not command:
             await self.client.event(
                 context.task_id,
@@ -1493,9 +1523,12 @@ class TaskRunner:
             command, cwd=context.worktree, check=False, timeout=self.config.command_timeout
         )
         output = (out + "\n" + err).strip()
+        message = f"Test runner finished with exit code {code}"
+        if code == 127:
+            message += " (command not found — check DEVAGENT_TEST_COMMAND)"
         await self.client.event(
             context.task_id,
-            f"Test runner finished with exit code {code}",
+            message,
             event_type="test_run",
             details={"exitCode": code, "tail": output[-2000:]},
         )
