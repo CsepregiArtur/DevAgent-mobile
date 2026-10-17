@@ -95,6 +95,9 @@ class Config:
     llm_timeout: float
     browser_headers: bool = True
     origin: str | None = None
+    # Testing/CI: ignore the provider the gateway attaches to a task and use the
+    # local env instead (keeps the end-to-end test independent of any LLM).
+    ignore_provider: bool = False
 
     @staticmethod
     def from_env(env: dict[str, str] | None = None) -> "Config":
@@ -132,6 +135,7 @@ class Config:
             # like a browser (403), so the agent sends a normal header set by default.
             browser_headers=_bool(env.get("DEVAGENT_BROWSER_HEADERS"), True),
             origin=env.get("DEVAGENT_ORIGIN") or None,
+            ignore_provider=_bool(env.get("DEVAGENT_IGNORE_PROVIDER"), False),
         )
 
 
@@ -699,7 +703,9 @@ class TaskRunner:
         self._cancelled.discard(task_id)
 
         provider = message.get("provider") or {}
-        self._provider = provider if provider.get("baseUrl") else None
+        self._provider = (
+            provider if provider.get("baseUrl") and not self.config.ignore_provider else None
+        )
         self._task_model = message.get("model") or None
         if self._provider:
             await self.client.event(
