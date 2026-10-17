@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.1.1"
+CLIENT_VERSION = "v1.1.2"
 
 
 # ----------------------------------------------------------------------
@@ -253,6 +253,8 @@ class Config:
     origin: str | None = None
     # ws | http | auto  (auto = websocket, then HTTPS long-poll if refused with 403)
     transport: str = "auto"
+    # Safety prompt for shell commands: give up (skip the command) after this long.
+    command_approval_wait_seconds: float = 900.0
     # Testing/CI: ignore the provider the gateway attaches to a task and use the
     # local env instead (keeps the end-to-end test independent of any LLM).
     ignore_provider: bool = False
@@ -294,6 +296,9 @@ class Config:
             browser_headers=_bool(env.get("DEVAGENT_BROWSER_HEADERS"), True),
             origin=env.get("DEVAGENT_ORIGIN") or None,
             transport=(env.get("DEVAGENT_TRANSPORT") or "auto").strip().lower(),
+            command_approval_wait_seconds=float(
+                env.get("DEVAGENT_COMMAND_APPROVAL_WAIT_SECONDS", "900") or 900
+            ),
             ignore_provider=_bool(env.get("DEVAGENT_IGNORE_PROVIDER"), False),
         )
 
@@ -1312,6 +1317,7 @@ class TaskRunner:
         diff: str,
         step: int,
         already_requested: bool = False,
+        wait_timeout: float = 0.0,
     ) -> None:
         if not already_requested:
             await self._request_approval(context, gate, step=step)
@@ -1321,10 +1327,18 @@ class TaskRunner:
         event.clear()
         LOG.info("task %s: waiting for the operator decision on gate '%s'", task_id, gate)
         # While waiting we still need to notice a dropped connection: the abort is
-        # driven by the websocket loop calling on_disconnect().
+        # driven by the websocket loop calling on_disconnect(). A decision that
+        # never arrives (e.g. the proposal was refused by the gateway) must not
+        # hang the task forever.
+        limit = wait_timeout
+        started = time.monotonic()
         while not event.is_set():
             if not self.client.connected.is_set():
                 raise asyncio.CancelledError()
+            if limit and time.monotonic() - started > limit:
+                raise TaskAborted(
+                    f"no operator decision on the {gate} gate after {limit / 60:.0f} minutes"
+                )
             await asyncio.sleep(0.5)
 
         decision = self._approval_data.pop(task_id, {})
@@ -1432,25 +1446,30 @@ class TaskRunner:
 
         summary = (
             f"Applied {len(diff_files(selected))} file(s) on branch {context.branch}; "
-            f"tests {'passed' if tests_passed else 'failed'}."
+            + (
+                "tests passed."
+                if tests_passed
+                else ("tests failed." if tests_passed is False else "verification skipped.")
+            )
         )
         result = {
             "summary": summary,
             "filesModified": [f["path"] for f in diff_files(selected)],
-            "testsPassed": tests_passed,
+            "testsPassed": bool(tests_passed),
+            "testsRan": tests_passed is not None,
             "testOutput": test_output[-4000:] if test_output else "",
             "branchName": context.branch,
         }
-        if tests_passed:
-            self.completed_tasks += 1
-            await self.client.result(task_id, "completed", result=result)
-        else:
+        if tests_passed is False:
             self.failed_tasks += 1
             await self.client.result(
                 task_id, "failed", result=result, error="Automated tests failed after applying the patch"
             )
+        else:
+            self.completed_tasks += 1
+            await self.client.result(task_id, "completed", result=result)
 
-    async def _run_tests(self, context: TaskContext) -> tuple[bool, str]:
+    async def _run_tests(self, context: TaskContext) -> tuple[bool | None, str]:
         command = self.config.test_command or detect_test_command(context.worktree)
         if not command:
             await self.client.event(
@@ -1462,7 +1481,7 @@ class TaskRunner:
         if self.config.approve_commands and "shell" not in context.approvals:
             approved = await self._approve_command(context, command, purpose="verification")
             if not approved:
-                return False, "test command was not approved"
+                return None, f"skipped: the operator did not approve running: {command}"
             context.approvals.append("shell")
         await self.client.event(
             context.task_id,
@@ -1491,14 +1510,29 @@ class TaskRunner:
         )
         await self.client.request_approval(
             context.task_id,
-            "apply",
+            "command",
             f"Approve command execution ({purpose}): {command}",
             f"# Command\n{command}\n\n# Worktree\n{context.worktree}\n",
             [{"path": f"command:{purpose}", "status": "modified", "additions": 0, "deletions": 0}],
         )
-        await self._wait_for_approval(
-            context, gate="apply", summary="", diff=context.diff, step=4, already_requested=True
-        )
+        try:
+            await self._wait_for_approval(
+                context,
+                gate="command",
+                summary="",
+                diff=context.diff,
+                step=4,
+                already_requested=True,
+                wait_timeout=self.config.command_approval_wait_seconds,
+            )
+        except TaskAborted:
+            await self.client.event(
+                context.task_id,
+                f"Command not approved; skipping {purpose}: {command}",
+                event_type="log",
+                details={"command": command},
+            )
+            return False
         return True
 
     async def _commit(self, context: TaskContext) -> None:

@@ -325,11 +325,22 @@ export const TaskDetailScreen: React.FC<TaskDetailScreenProps> = ({
             {task.approval.summary}
           </p>
 
-          {/* Unified Diff Inspection */}
-          <DiffViewer 
-            diff={task.approval.diff} 
-            files={task.approval.proposedChanges} 
-          />
+          {/* Unified Diff Inspection (a command prompt shows the exact command) */}
+          {task.approval.gate === 'command' ? (
+            <div className="space-y-1.5">
+              <span className="text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/60">
+                command approval
+              </span>
+              <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-amber-200">
+                {task.approval.diff.replace(/^#.*\n?/gm, '').trim()}
+              </pre>
+            </div>
+          ) : (
+            <DiffViewer 
+              diff={task.approval.diff} 
+              files={task.approval.proposedChanges} 
+            />
+          )}
 
           {/* Explicit Approve and Reject Actions */}
           <div className="pt-2 flex items-center gap-3">

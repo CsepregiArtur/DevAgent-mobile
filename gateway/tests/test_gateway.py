@@ -570,3 +570,66 @@ def test_gateway_restart_reconciles_agents_and_running_tasks(tmp_path: Path) -> 
             resume = ws.receive_json()
             assert resume["type"] == "task_resume"
             assert resume["action"] == "resume"
+
+
+def test_command_approval_is_a_safety_prompt_not_a_pipeline_gate(client: TestClient) -> None:
+    """Running a shell command needs an approval even when the task only has `diff`.
+
+    Rejecting it must skip the command, not fail the task (the agent continues).
+    """
+    with client.websocket_connect(agent_url("macbook-cmd")) as ws:
+        say_hello(ws)
+        task = create_task(client)
+        assert ws.receive_json()["type"] == "task_assign"
+
+        ws.send_json(
+            {
+                "type": "approval_request",
+                "taskId": task["id"],
+                "gate": "diff",
+                "summary": "Add rate limiting to /login",
+                "diff": DIFF,
+                "files": [{"path": "src/routes/auth.ts", "status": "modified", "additions": 2, "deletions": 1}],
+            }
+        )
+        assert ws.receive_json()["type"] == "approval_ack"
+        detail = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+        approved = client.post(
+            f"/mobile/api/tasks/{task['id']}/approval",
+            json={"action": "approve", "hash": detail["approval"]["hash"]},
+            headers=AUTH,
+        )
+        assert approved.status_code == 200
+        assert ws.receive_json()["type"] == "approval_decision"
+
+        # `command` is not in the task's gates, yet the prompt is accepted
+        ws.send_json(
+            {
+                "type": "approval_request",
+                "taskId": task["id"],
+                "gate": "command",
+                "summary": "Approve command execution (verification): python3 -m pytest -q",
+                "diff": "# Command\npython3 -m pytest -q\n",
+                "files": [{"path": "command:verification", "status": "modified"}],
+            }
+        )
+        ack = ws.receive_json()
+        assert ack["type"] == "approval_ack"
+        assert ack["gate"] == "command"
+
+        detail = client.get(f"/mobile/api/tasks/{task['id']}", headers=AUTH).json()["task"]
+        assert detail["status"] == "awaiting_approval"
+        assert detail["approval"]["gate"] == "command"
+
+        rejected = client.post(
+            f"/mobile/api/tasks/{task['id']}/approval",
+            json={"action": "reject", "hash": detail["approval"]["hash"], "comment": "not that command"},
+            headers=AUTH,
+        )
+        assert rejected.status_code == 200
+        assert rejected.json()["task"]["status"] == "running"
+
+        decision = ws.receive_json()
+        assert decision["type"] == "approval_decision"
+        assert decision["gate"] == "command"
+        assert decision["decision"] == "reject"

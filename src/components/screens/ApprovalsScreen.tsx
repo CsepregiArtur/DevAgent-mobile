@@ -175,8 +175,19 @@ export const ApprovalsScreen: React.FC<ApprovalsScreenProps> = ({
                   {approval.summary}
                 </p>
 
-                {/* Diff Viewer */}
-                <DiffViewer diff={approval.diff} files={approval.proposedChanges} />
+                {/* Diff Viewer (a command prompt shows the exact command) */}
+                {approval.gate === 'command' ? (
+                  <div className="space-y-1.5">
+                    <span className="text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/60">
+                      command approval
+                    </span>
+                    <pre className="text-[11px] font-mono whitespace-pre-wrap break-words bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-amber-200">
+                      {approval.diff.replace(/^#.*\n?/gm, '').trim()}
+                    </pre>
+                  </div>
+                ) : (
+                  <DiffViewer diff={approval.diff} files={approval.proposedChanges} />
+                )}
 
                 {/* Explicit Approve and Reject buttons */}
                 <div className="pt-2 grid grid-cols-2 gap-3">

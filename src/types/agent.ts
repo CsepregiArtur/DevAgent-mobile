@@ -61,6 +61,7 @@ export type ApprovalState = 'pending' | 'approved' | 'rejected' | 'expired';
 export interface TaskApproval {
   id: string;
   taskId: string;
+  gate?: string;
   hash: string;
   summary: string;
   proposedChanges: ChangedFile[];

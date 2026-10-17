@@ -598,17 +598,26 @@ class TaskService:
 
         gate = (message.get("gate") or "diff").lower()
         gates = task.get("gates_json") or ["diff"]
-        if gate not in gates:
+        # ``command`` is a safety prompt (may I run this shell command?), not a
+        # pipeline gate: it is allowed even when the task only enabled `diff`.
+        if gate != "command" and gate not in gates:
             raise ServiceError(f"Gate '{gate}' is not enabled for task {task_id}", 409)
         existing = await self.db.pending_approval(task_id)
         if existing is not None:
             # Re-submission after a reconnect: never create a second live proposal.
+            if existing["gate"] != gate:
+                raise ServiceError(
+                    f"Another approval ('{existing['gate']}') is still pending for {task_id}",
+                    409,
+                    pendingGate=existing["gate"],
+                )
             return approval_to_dict(existing)
-        expected = await self.expected_gate(task_id)
-        if expected and gate != expected:
-            raise ServiceError(
-                f"Gate '{gate}' cannot be reviewed yet; expected '{expected}'", 409
-            )
+        if gate != "command":
+            expected = await self.expected_gate(task_id)
+            if expected and gate != expected:
+                raise ServiceError(
+                    f"Gate '{gate}' cannot be reviewed yet; expected '{expected}'", 409
+                )
         if task["status"] in TERMINAL_STATUSES:
             raise ServiceError(f"Task is already {task['status']}", 409)
 
@@ -734,24 +743,38 @@ class TaskService:
         )
         assert approval is not None
 
+        # Rejecting a command prompt skips that command; it does not fail the task.
+        rejected_command = payload.action != "approve" and approval["gate"] == "command"
         agent_id = task.get("agent_id")
-        if payload.action == "approve":
+        if payload.action == "approve" or rejected_command:
             next_gate = await self.expected_gate(task_id)
             await self.db.update_task(
                 task_id,
                 status="running",
                 current_step=(
-                    f"Approval granted. Applying changes ({next_gate} gate pending)."
-                    if next_gate
-                    else "Approval granted. Applying changes and running verification."
+                    "Command rejected; finishing without it."
+                    if rejected_command
+                    else (
+                        f"Approval granted. Applying changes ({next_gate} gate pending)."
+                        if next_gate
+                        else "Approval granted. Applying changes and running verification."
+                    )
                 ),
             )
             await self._emit(
                 task_id,
                 type="approval_resolved",
-                message=f"Approval granted for the {approval['gate']} proposal"
-                + (f": {payload.comment}" if payload.comment else "."),
-                details={"approvalId": approval["id"], "gate": approval["gate"], "decision": "approve"},
+                message=(
+                    f"Command rejected ({approval['gate']}): continuing without running it"
+                    if rejected_command
+                    else f"Approval granted for the {approval['gate']} proposal"
+                    + (f": {payload.comment}" if payload.comment else ".")
+                ),
+                details={
+                    "approvalId": approval["id"],
+                    "gate": approval["gate"],
+                    "decision": "reject" if rejected_command else "approve",
+                },
             )
             if agent_id:
                 await self.hub.send_to_agent(
@@ -761,7 +784,7 @@ class TaskService:
                         "taskId": task_id,
                         "approvalId": approval["id"],
                         "gate": approval["gate"],
-                        "decision": "approve",
+                        "decision": "reject" if rejected_command else "approve",
                         "comment": payload.comment,
                         "items": approval.get("items_json") or [],
                         "decisions": decisions,
@@ -769,7 +792,11 @@ class TaskService:
                     },
                 )
                 await self.db.set_agent_status(agent_id, "busy", active_task_id=task_id)
-            message = "Changes approved and resumed."
+            message = (
+                "Command rejected; the task continues without it."
+                if rejected_command
+                else "Changes approved and resumed."
+            )
         else:
             await self.db.update_task(
                 task_id,
