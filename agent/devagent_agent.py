@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.0.0"
+CLIENT_VERSION = "v1.0.1"
 
 
 # ----------------------------------------------------------------------
@@ -1368,11 +1368,34 @@ async def _validate_connection(env: dict[str, str]) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _step(number: int, total: int, title: str) -> None:
+    print(f"\n[{number}/{total}] {title}")
+    print("-" * 46)
+
+
+def _explain(text: str) -> None:
+    for line in text.strip("\n").splitlines():
+        print(f"   {line}")
+    print()
+
+
+def _default_workspaces() -> str:
+    dev = Path.home() / "dev"
+    return str(dev if dev.exists() else Path.home())
+
+
 async def run_setup(env_path: Path) -> int:
-    """Interactive first-run configuration; writes ``agent.env`` (mode 600)."""
+    """Guided first-run configuration; writes ``agent.env`` (mode 600)."""
+    total = 6
     print("\n=== DevAgent agent setup ===\n")
-    print("Nothing is installed yet: this wizard writes your settings file and")
-    print("then verifies that the gateway accepts this machine.\n")
+    print("This machine will become a DevAgent worker: it takes coding tasks from")
+    print("the gateway, works in an isolated git worktree and waits for your")
+    print("approval before applying anything.\n")
+    print("You need three things:")
+    print("  • the gateway URL      (the default is correct for the hosted gateway)")
+    print("  • an agent API key     (generated in the app, Settings → API keys)")
+    print("  • the folders it may edit (absolute paths, comma separated)")
+    print("\nPress Enter to accept the default shown in [brackets].")
 
     existing: dict[str, str] = {}
     if env_path.exists():
@@ -1382,29 +1405,103 @@ async def run_setup(env_path: Path) -> int:
                 key, _, value = line.partition("=")
                 existing[key.strip()] = value.strip().strip('"')
 
+    # 1 -- gateway ------------------------------------------------------
+    _step(1, total, "Gateway")
+    _explain(
+        """
+The agent opens an OUTBOUND WebSocket to the gateway; no port is opened on this
+machine. Keep the default if you use the hosted gateway.
+Change it only for your own deployment, e.g.
+  ws://127.0.0.1:8082/mobile/agent/ws   (gateway on this computer)
+        """
+    )
     gateway = _ask(
         "Gateway WebSocket URL",
         existing.get("DEVAGENT_GATEWAY_URL", "wss://deepseek-api.cs-hub.xyz/mobile/agent/ws"),
     )
-    print("  (Settings -> API keys -> generate a key with kind 'agent')")
-    token = _ask("Agent token", existing.get("DEVAGENT_AGENT_TOKEN", ""), secret=True)
+
+    # 2 -- API key ------------------------------------------------------
+    _step(2, total, "Agent API key")
+    _explain(
+        """
+Generate a key for THIS machine in the app:
+   Settings → API keys → name: mbp-yourname · kind: agent → Generate
+Copy the dvk_… value immediately (it is shown only once) and paste it here.
+One key per machine is best: you can revoke a single machine later.
+        """
+    )
+    token = _ask("Agent API key (dvk_…)", existing.get("DEVAGENT_AGENT_TOKEN", ""), secret=True)
     if not token:
-        print("A token is required to enrol this machine.")
+        print("\nA key is required to enrol this machine. Nothing was written.")
         return 2
-    agent_id = _ask("Agent id (unique per machine)", existing.get("DEVAGENT_AGENT_ID", socket.gethostname().split(".")[0]))
-    workspaces = _ask(
-        "Allowed workspace roots (comma separated)",
-        existing.get("DEVAGENT_WORKSPACES", str(Path.home() / "dev")),
+    if not token.startswith(("dvk_", "dvs_")):
+        print("   note: this is not a dvk_… key. It still works if it is the bootstrap agent token,")
+        print("         but a per-machine key is safer (Settings → API keys).")
+
+    # 3 -- identity -----------------------------------------------------
+    _step(3, total, "Machine identity")
+    _explain(
+        """
+A short unique name for this machine; it is what you see in the app and what
+you pick in "Run on" when creating a task. Default: the hostname.
+        """
+    )
+    agent_id = _ask(
+        "Agent id (unique per machine)",
+        existing.get("DEVAGENT_AGENT_ID", socket.gethostname().split(".")[0]),
     )
 
-    llm_url = _ask("LLM endpoint (optional, Enter = manual plan mode)", existing.get("DEVAGENT_LLM_BASE_URL", ""))
+    # 4 -- workspaces ---------------------------------------------------
+    _step(4, total, "Folders it may edit")
+    _explain(
+        """
+Absolute paths, comma separated. The agent refuses anything outside them and
+edits inside an isolated git worktree (your working tree is never touched).
+Usually your code folder, e.g. ~/dev or ~/Projects.
+        """
+    )
+    workspaces = _ask(
+        "Allowed workspace roots",
+        existing.get("DEVAGENT_WORKSPACES", _default_workspaces()),
+    )
+    for entry in [part.strip() for part in workspaces.split(",") if part.strip()]:
+        resolved = Path(entry).expanduser()
+        if not resolved.exists():
+            print(f"   warning: {resolved} does not exist on this machine (created later?)")
+
+    # 5 -- AI provider --------------------------------------------------
+    _step(5, total, "AI provider")
+    _explain(
+        """
+Recommended: press Enter. The gateway attaches the AI provider configured in
+the app (Settings → AI providers) to every task, so this machine does not need
+any credential and you can switch models without touching the agent.
+Fill it in only if this machine must call a specific endpoint on its own
+(OpenAI-compatible base URL ending in /v1).
+        """
+    )
+    llm_url = _ask(
+        "Local LLM endpoint (Enter = use the provider from the app)",
+        existing.get("DEVAGENT_LLM_BASE_URL", ""),
+    )
     llm_token = ""
     if llm_url:
-        llm_token = _ask("LLM token", existing.get("DEVAGENT_LLM_TOKEN", ""), secret=True)
-    test_command = _ask("Test command (optional, Enter = auto-detect)", existing.get("DEVAGENT_TEST_COMMAND", ""))
+        llm_token = _ask("LLM token for that endpoint", existing.get("DEVAGENT_LLM_TOKEN", ""), secret=True)
+
+    # 6 -- workflow -----------------------------------------------------
+    _step(6, total, "Execution behaviour")
+    _explain(
+        """
+Test command: run after applying an approved patch. Empty = auto-detect
+(npm test, pytest, go test, cargo test, make test).
+Push / PR: off by default — the agent commits on a task branch locally.
+Dry-run: generate the diff but never apply it (useful for a first try).
+        """
+    )
+    test_command = _ask("Test command (optional)", existing.get("DEVAGENT_TEST_COMMAND", ""))
     push = _ask_bool("Push the branch after committing?", _bool(existing.get("DEVAGENT_PUSH_BRANCH"), False))
     create_pr = push and _ask_bool("Open a pull request with gh?", _bool(existing.get("DEVAGENT_CREATE_PR"), False))
-    dry_run = _ask_bool("Dry-run mode (generate the diff but never apply)?", _bool(existing.get("DEVAGENT_DRY_RUN"), False))
+    dry_run = _ask_bool("Start in dry-run mode?", _bool(existing.get("DEVAGENT_DRY_RUN"), False))
 
     values = {
         "DEVAGENT_GATEWAY_URL": gateway,
@@ -1433,22 +1530,44 @@ async def run_setup(env_path: Path) -> int:
     env_path.write_text("\n".join(lines), encoding="utf-8")
     with contextlib.suppress(OSError):
         os.chmod(env_path, 0o600)
-    print(f"\nSaved {env_path}")
 
+    masked = f"{token[:8]}…{token[-4:]}" if len(token) > 14 else "…"
+    print("\n=== Summary ===")
+    print(f"  gateway     : {gateway}")
+    print(f"  agent id    : {agent_id}")
+    print(f"  workspaces  : {workspaces}")
+    print(f"  api key     : {masked}")
+    print(f"  provider    : {'local ' + llm_url if llm_url else 'from the app (recommended)'}")
+    print(f"  test cmd    : {test_command or 'auto-detect'}")
+    print(f"  push/PR     : {'yes' if push else 'no'}{' / gh' if create_pr else ''}")
+    print(f"  dry-run     : {'yes' if dry_run else 'no'}")
+    print(f"  saved to    : {env_path} (mode 600)")
+
+    print("\nChecking the gateway handshake…")
     ok, detail = await _validate_connection(values)
     if ok:
-        print(f"Connection OK - {detail}")
-        print("\nStart the agent with:")
-        print(f'  "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"')
+        print(f"✅ Connection OK — {detail}")
+        print("\nNext steps")
+        print("  1) keep it running in the foreground to watch it:")
+        print(f'       "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}" --verbose')
+        print("     run it at login:")
+        print("       macOS   → launchd (agent/com.devagent.agent.plist)")
+        print("       Linux   → systemd unit (see docs/DEPLOY.md)")
+        print("       Windows → Task Scheduler at logon, action:")
+        print(f'       "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"')
+        print("  2) open the app → Dashboard: this machine appears in the fleet within ~2s")
+        print("  3) New Task → 'Run on' → pick this machine (or leave it on any idle agent)")
         return 0
 
-    print(f"\n[!] Could not enrol yet: {detail}")
+    print(f"\n⚠️  Could not enrol yet: {detail}")
     if "403" in detail:
-        print("    403 usually means a proxy/CDN in front of the gateway blocked the WebSocket.")
+        print("    403 = a proxy/CDN in front of the gateway blocked the WebSocket.")
     elif "401" in detail:
-        print("    401 means the token is wrong, revoked or of the wrong kind (use kind 'agent').")
-    print("Fix the value above and re-run setup; the file was kept so you can edit it:")
-    print(f'  "{sys.executable}" "{Path(__file__).resolve()}" --setup')
+        print("    401 = the key is wrong, revoked, or of the wrong kind (must be `agent`).")
+    elif "getaddrinfo" in detail or "Name or service" in detail:
+        print("    DNS: check the gateway URL (typo? offline?).")
+    print("    Your answers were saved, so you can fix one value and re-run:")
+    print(f'      "{sys.executable}" "{Path(__file__).resolve()}" --setup --env-file "{env_path}"')
     return 1
 
 

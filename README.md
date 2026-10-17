@@ -90,9 +90,12 @@ Invoke-WebRequest -Uri https://github.com/CsepregiArtur/DevAgent-mobile/releases
 .\devagent-agent.exe --setup
 ```
 
-Wizard-ul întreabă la prima rulare: URL gateway, token de agent (generat din
-**Settings → API keys**, kind `agent`), agent id, directoare de lucru, endpoint LLM
-(opțional) — apoi scrie `~/.devagent/agent.env` și **verifică handshake-ul**.
+Wizard-ul are **6 pași** și explică la fiecare ce trebuie introdus: gateway URL
+(Enter = cel găzduit), agent API key (Settings → API keys, kind `agent`), agent id,
+foldere permise, endpoint LLM (**Enter** = providerul din aplicație, recomandat) și
+comportament (test / push / dry-run). La final: sumar cu cheia mascată, scrierea
+`~/.devagent/agent.env` (0600), verificarea handshake-ului și pașii de pornire
+(launchd / systemd / Task Scheduler).
 Pe fiecare mașină suplimentară repeți cu alt `DEVAGENT_AGENT_ID`.
 
 > Binarele sunt nesemnate: macOS → `xattr -dr com.apple.quarantine`; Windows →

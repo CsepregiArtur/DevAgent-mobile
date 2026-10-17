@@ -459,9 +459,22 @@ Active produse: `devagent-agent-macos-arm64`, `devagent-agent-macos-x64`,
 `/releases/latest/download/<asset>` (cardul **Install the agent**).
 
 La prima rulare, binarul pornește automat **wizard-ul** (`--setup`) dacă nu există
-fișier de configurare, întreabă: URL gateway, token de agent (Settings → API keys,
-kind `agent`), agent id, directoare de lucru, endpoint LLM (opțional), apoi scrie
-`~/.devagent/agent.env` (0600) și **verifică handshake-ul**.
+fișier de configurare. Wizard-ul are **6 pași** și explică la fiecare ce trebuie introdus
+și de unde vine valoarea:
+
+| Pas | Ce întreabă | De unde |
+|---|---|---|
+| 1/6 | Gateway WebSocket URL | Enter = gateway-ul găzduit; `ws://127.0.0.1:8082/mobile/agent/ws` pentru unul local |
+| 2/6 | Agent API key (`dvk_…`) | aplicația → Settings → API keys → kind `agent` → Generate (se afișează o singură dată) |
+| 3/6 | Agent id | nume unic pe mașină (implicit = hostname), apare în flotă și în „Run on” |
+| 4/6 | Foldere permise | căi absolute, separate prin virgulă (ex. `~/dev`); agentul refuză orice e în afara lor |
+| 5/6 | LLM endpoint | **Enter** = folosește providerul din aplicație (recomandat); completați doar dacă mașina trebuie să cheme un endpoint propriu |
+| 6/6 | Comportament | comandă de test (Enter = autodetectare), push/PR (implicit nu), dry-run (implicit nu) |
+
+La final afișează un **sumar** (cheia mascată), scrie `~/.devagent/agent.env` (0600),
+verifică handshake-ul și tipărește pașii următori (launchd / systemd / Task Scheduler).
+Dacă verificarea eșuează, răspunsurile rămân salvate și vă spune exact ce înseamnă
+eroarea (`401` token greșit/revocat, `403` proxy/CDN, DNS).
 
 > Binarele nu sunt semnate: macOS afișează avertisment Gatekeeper →
 > `xattr -dr com.apple.quarantine devagent-agent`; Windows SmartScreen →
