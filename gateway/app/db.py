@@ -341,6 +341,18 @@ class Database:
     async def list_tokens(self) -> list[dict[str, Any]]:
         return await self._fetchall("SELECT * FROM api_tokens ORDER BY created_at DESC")
 
+    async def recent_workspaces(self, limit: int = 12) -> list[str]:
+        """Distinct folders used by recent tasks (suggestions for the picker)."""
+        rows = await self._fetchall(
+            "SELECT workspace, MAX(created_at) AS last_used FROM tasks "
+            "WHERE workspace IS NOT NULL AND workspace <> '' "
+            "AND workspace NOT LIKE '/tmp/%' AND workspace NOT LIKE '/var/folders/%' "
+            "AND workspace NOT LIKE '%devagent-smoke%' "
+            "GROUP BY workspace ORDER BY last_used DESC LIMIT ?",
+            (limit,),
+        )
+        return [row["workspace"] for row in rows]
+
     async def find_token_by_hash(self, token_hash: str) -> dict[str, Any] | None:
         return await self._fetchone(
             "SELECT * FROM api_tokens WHERE token_hash = ?", (token_hash,)

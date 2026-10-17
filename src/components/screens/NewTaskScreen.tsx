@@ -220,24 +220,37 @@ export const NewTaskScreen: React.FC<NewTaskScreenProps> = ({
           </div>
         </div>
 
-        {/* Workspace Selection */}
+        {/* Workspace Selection (editable: a repo inside one of the agent's roots) */}
         <div className="space-y-1.5">
           <label className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
             <FolderGit2 className="w-3.5 h-3.5 text-zinc-500" />
             <span>Target Workspace</span>
           </label>
-          <select
+          <input
+            list="devagent-workspaces"
             value={workspace}
             onChange={(e) => setWorkspace(e.target.value)}
             disabled={isSubmitting}
-            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs font-mono text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition"
-          >
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            placeholder="/Users/artur/PyProg/my-repo"
+            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-xs font-mono text-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 transition disabled:opacity-60"
+          />
+          <datalist id="devagent-workspaces">
             {workspaces.map((ws) => (
-              <option key={ws} value={ws}>
-                {ws}
-              </option>
+              <option key={ws} value={ws} />
             ))}
-          </select>
+          </datalist>
+          <p className="text-[10px] text-zinc-500">
+            Type any folder or pick a suggestion. It must live inside the agent's allowed roots
+            (<span className="font-mono">DEVAGENT_WORKSPACES</span>) and be a git repository.
+          </p>
+          {workspace.trim() !== '' && !workspace.trim().startsWith('/') && !workspace.trim().startsWith('~/') && (
+            <p className="text-[10px] text-amber-400">
+              Relative paths are resolved against the agent's first root — prefer an absolute path.
+            </p>
+          )}
         </div>
 
         {/* Worker selection (multi-machine fleets) */}

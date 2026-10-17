@@ -1211,6 +1211,8 @@ class TaskService:
         for agent in ordered:
             if agent.get("workspace"):
                 discovered.append(agent["workspace"])
+        # Recently used folders make the picker useful for repos inside a root.
+        discovered.extend(await self.db.recent_workspaces())
         discovered.extend(list(self.settings.workspaces))
         seen: list[str] = []
         for workspace in discovered:
