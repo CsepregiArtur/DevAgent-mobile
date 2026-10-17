@@ -27,21 +27,47 @@ CLOSE_SHUTDOWN = 1001
 
 @dataclass
 class AgentConnection:
+    """One control channel per agent.
+
+    ``transport="websocket"`` keeps the socket; ``transport="http"`` uses a queue
+    drained by ``POST /api/agent/poll`` (fallback for networks that block WS).
+    """
+
     agent_id: str
-    websocket: WebSocket
+    websocket: WebSocket | None = None
+    transport: str = "websocket"
+    queue: asyncio.Queue[dict[str, Any]] | None = None
+    closed: bool = False
     connected_at: str = field(default_factory=utcnow)
     last_seen_monotonic: float = field(default_factory=lambda: asyncio.get_event_loop().time())
     capabilities: list[str] = field(default_factory=list)
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def send(self, payload: dict[str, Any]) -> bool:
+        if self.transport == "http":
+            if self.closed or self.queue is None:
+                return False
+            self.queue.put_nowait(payload)
+            if self.queue.qsize() > 500:  # pragma: no cover - runaway agent
+                logger.warning("agent %s: http queue overflow, dropping oldest", self.agent_id)
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    self.queue.get_nowait()
+            return True
         async with self._send_lock:
             try:
+                assert self.websocket is not None
                 await self.websocket.send_json(payload)
                 return True
             except Exception as exc:  # pragma: no cover - broken socket
                 logger.info("agent %s: send failed (%s)", self.agent_id, exc)
                 return False
+
+    async def stop(self, code: int = CLOSE_REPLACED, reason: str = "") -> None:
+        """Close the channel (socket and/or queue) without unregistering it."""
+        self.closed = True
+        if self.websocket is not None:
+            with contextlib.suppress(Exception):
+                await self.websocket.close(code=code, reason=reason)
 
 
 class AgentHub:
@@ -58,8 +84,7 @@ class AgentHub:
             logger.info(
                 "agent %s: replacing previous connection (%s)", connection.agent_id, previous.connected_at
             )
-            with contextlib.suppress(Exception):
-                await previous.websocket.close(code=CLOSE_REPLACED, reason="replaced by a new session")
+            await previous.stop(code=CLOSE_REPLACED, reason="replaced by a new session")
 
     async def unregister(self, agent_id: str, websocket: WebSocket | None = None) -> bool:
         """Remove a connection; ignores stale unregisters from replaced sockets."""
@@ -71,6 +96,14 @@ class AgentHub:
                 return False
             del self._connections[agent_id]
             return True
+
+    async def remove_connection(self, connection: AgentConnection) -> bool:
+        """Remove ``connection`` only if it is still the registered one."""
+        async with self._lock:
+            if self._connections.get(connection.agent_id) is connection:
+                del self._connections[connection.agent_id]
+                return True
+            return False
 
     def get(self, agent_id: str) -> AgentConnection | None:
         return self._connections.get(agent_id)
@@ -112,8 +145,7 @@ class AgentHub:
             connections = list(self._connections.values())
             self._connections.clear()
         for connection in connections:
-            with contextlib.suppress(Exception):
-                await connection.websocket.close(code=CLOSE_SHUTDOWN, reason="gateway shutting down")
+            await connection.stop(code=CLOSE_SHUTDOWN, reason="gateway shutting down")
 
     @property
     def connection_count(self) -> int:

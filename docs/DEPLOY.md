@@ -499,6 +499,36 @@ Invoke-WebRequest -Uri https://github.com/CsepregiArtur/DevAgent-mobile/releases
 .\devagent-agent.exe --setup
 ```
 
+### 6.6 Transport alternativ: HTTPS long-poll (când WebSocket-ul e blocat)
+
+Unele rețele (WAF-ul Cloudflare al zonei, proxy corporativ) răspund `403` la
+upgrade-ul WebSocket, deși traficul HTTPS obișnuit trece. Agentul are aceleași
+mesaje și pe un transport bazat pe POST:
+
+| Endpoint | Rol |
+|---|---|
+| `POST /mobile/api/agent/send` | agent → gateway (`hello`, `heartbeat`, `checkpoint`, `approval_request`, `result`); răspunsul conține ack-urile |
+| `POST /mobile/api/agent/poll` | gateway → agent, long-poll până la 50s (`welcome`, `task_assign`, `task_resume`, `approval_decision`, `cancel`) |
+| `POST /mobile/api/agent/disconnect` | închidere curată a canalului |
+
+Autentificare: `Authorization: Bearer <agent key>` (nu mai e nevoie de `?token=`).
+Gateway-ul ține același registry de agenți, deci coada, dispatch-ul, aprobările și
+reluarea funcționează identic; un agent nu poate avea simultan WebSocket și long-poll
+(al doilea primește `409`).
+
+```sh
+# DEVAGENT_TRANSPORT: auto (implicit) | ws | http
+DEVAGENT_TRANSPORT="http" ./devagent-agent --verbose
+```
+
+Cu `auto`, agentul încearcă WebSocket-ul și, la primul `403`, comută singur pe
+long-poll (log: `websocket refused with 403 … switching to HTTPS long-poll`).
+Wizard-ul verifică și el fallback-ul: dacă socketul e refuzat dar HTTPS-ul trece,
+scrie `✅ Connection OK — enrolled as … (HTTPS long-poll; WebSocket refused)`.
+
+> Long-poll-ul ține o cerere deschisă ~25s. Timeout-ul de origine Cloudflare este
+> 100s, deci încape; dacă folosești alt proxy, verifică `proxy_read_timeout`.
+
 ---
 
 ## 7. Instrucțiuni: agentul de pe MacBook

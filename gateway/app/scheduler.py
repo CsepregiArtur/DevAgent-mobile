@@ -93,9 +93,8 @@ class Scheduler:
                 logger.warning("agent %s socket silent for %.0fs -> closing", agent_id, seconds)
                 connection = self.hub.get(agent_id)
                 if connection is not None:
-                    with contextlib.suppress(Exception):
-                        await connection.websocket.close(code=4000, reason="stale socket")
-                    await self.hub.unregister(agent_id, connection.websocket)
+                    await connection.stop(code=4000, reason="stale socket")
+                    await self.hub.remove_connection(connection)
                 await self.service.mark_agent_offline(agent_id)
 
     # -- approvals -------------------------------------------------------

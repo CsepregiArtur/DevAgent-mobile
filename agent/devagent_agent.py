@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.0.4"
+CLIENT_VERSION = "v1.1.0"
 
 
 # ----------------------------------------------------------------------
@@ -158,6 +158,8 @@ class Config:
     llm_timeout: float
     browser_headers: bool = True
     origin: str | None = None
+    # ws | http | auto  (auto = websocket, then HTTPS long-poll if refused with 403)
+    transport: str = "auto"
     # Testing/CI: ignore the provider the gateway attaches to a task and use the
     # local env instead (keeps the end-to-end test independent of any LLM).
     ignore_provider: bool = False
@@ -198,6 +200,7 @@ class Config:
             # like a browser (403), so the agent sends a normal header set by default.
             browser_headers=_bool(env.get("DEVAGENT_BROWSER_HEADERS"), True),
             origin=env.get("DEVAGENT_ORIGIN") or None,
+            transport=(env.get("DEVAGENT_TRANSPORT") or "auto").strip().lower(),
             ignore_provider=_bool(env.get("DEVAGENT_IGNORE_PROVIDER"), False),
         )
 
@@ -401,6 +404,46 @@ class GatewayClient:
         self.stopping = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self.last_welcome: dict[str, Any] = {}
+        allowed = {"ws", "http", "auto"}
+        self.requested_transport = config.transport if config.transport in allowed else "auto"
+        self.transport = "http" if self.requested_transport == "http" else "ws"
+
+    # -- HTTPS long-poll fallback ---------------------------------------------
+    def http_base(self) -> str:
+        """Derive the HTTPS API root from the WebSocket URL (…/agent/ws)."""
+        parsed = urllib.parse.urlparse(self.config.gateway_url)
+        scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
+        path = parsed.path or ""
+        if path.endswith("/agent/ws"):
+            path = path[: -len("/agent/ws")]
+        return f"{scheme}://{parsed.netloc}{path}".rstrip("/")
+
+    def _http_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.token}",
+        }
+        headers.update(self.handshake_headers() or {})
+        return headers
+
+    def _http_call_sync(self, endpoint: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        url = f"{self.http_base()}/api/agent/{endpoint}"
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"), headers=self._http_headers(), method="POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+                return json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            body = ""
+            with contextlib.suppress(Exception):
+                body = exc.read(300).decode("utf-8", "replace").strip()
+            raise RuntimeError(f"HTTP {exc.code} on /api/agent/{endpoint}: {body[:200]}") from exc
+
+    async def _http_call(
+        self, endpoint: str, payload: dict[str, Any], timeout: float = 30
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(self._http_call_sync, endpoint, payload, timeout)
 
     @property
     def url(self) -> str:
@@ -450,6 +493,17 @@ class GatewayClient:
             return await websockets.connect(self.url, **kwargs)
 
     async def send(self, payload: dict[str, Any]) -> bool:
+        if self.transport == "http":
+            try:
+                data = await self._http_call(
+                    "send", {"agentId": self.config.agent_id, "message": payload}, timeout=30
+                )
+            except Exception as exc:
+                LOG.debug("http send failed: %s", exc)
+                return False
+            for message in data.get("messages") or []:
+                await self._handle(message)
+            return True
         if self.websocket is None:
             return False
         async with self._send_lock:
@@ -463,6 +517,8 @@ class GatewayClient:
                 return False
 
     async def run_forever(self) -> None:
+        if self.transport == "http":
+            return await self._run_http()
         delay = 1.0
         while not self.stopping.is_set():
             try:
@@ -484,6 +540,12 @@ class GatewayClient:
             except asyncio.CancelledError:  # pragma: no cover - shutdown
                 raise
             except Exception as exc:
+                if self.requested_transport == "auto" and "403" in str(exc):
+                    LOG.warning(
+                        "websocket refused with 403 (proxy/WAF?) — switching to HTTPS long-poll"
+                    )
+                    self.transport = "http"
+                    return await self._run_http()
                 LOG.warning("connection lost (%s); retrying in %.0fs", exc, delay)
             finally:
                 self.websocket = None
@@ -498,20 +560,62 @@ class GatewayClient:
                 pass
             delay = min(delay * 2, 30.0)
 
+    async def _run_http(self) -> None:
+        """Same protocol over POST /api/agent/send + /api/agent/poll."""
+        delay = 1.0
+        while not self.stopping.is_set():
+            try:
+                LOG.info("connecting to %s over HTTPS long-poll", self.http_base())
+                self.connected.set()
+                delay = 1.0
+                await self._hello()
+                heartbeat = asyncio.create_task(self._heartbeat_loop())
+                try:
+                    while not self.stopping.is_set():
+                        data = await self._http_call(
+                            "poll", {"agentId": self.config.agent_id, "wait": 25}, timeout=45
+                        )
+                        if data.get("replaced"):
+                            LOG.warning("another session took over agent id %s", self.config.agent_id)
+                            self.stopping.set()
+                            return
+                        for message in data.get("messages") or []:
+                            await self._handle(message)
+                finally:
+                    heartbeat.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat
+            except asyncio.CancelledError:  # pragma: no cover - shutdown
+                raise
+            except Exception as exc:
+                LOG.warning("long-poll failed (%s); retrying in %.0fs", exc, delay)
+            finally:
+                self.connected.clear()
+                self.runner.on_disconnect()
+
+            if self.stopping.is_set():
+                break
+            try:
+                await asyncio.wait_for(self.stopping.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, 30.0)
+
+    def hello_payload(self) -> dict[str, Any]:
+        return {
+            "type": "hello",
+            "agentId": self.config.agent_id,
+            "hostname": socket.gethostname(),
+            "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
+            "version": CLIENT_VERSION,
+            "workspace": str(self.config.workspaces[0]) if self.config.workspaces else "~",
+            "capabilities": self.capabilities(),
+            "batteryLevel": battery_level(),
+            "activeTaskId": self.runner.active_task_id,
+        }
+
     async def _hello(self) -> None:
-        await self.send(
-            {
-                "type": "hello",
-                "agentId": self.config.agent_id,
-                "hostname": socket.gethostname(),
-                "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
-                "version": CLIENT_VERSION,
-                "workspace": str(self.config.workspaces[0]) if self.config.workspaces else "~",
-                "capabilities": self.capabilities(),
-                "batteryLevel": battery_level(),
-                "activeTaskId": self.runner.active_task_id,
-            }
-        )
+        await self.send(self.hello_payload())
 
     def capabilities(self) -> list[str]:
         caps = ["git", "worktree", "checkpoint", "approval"]
@@ -1463,7 +1567,29 @@ async def _validate_connection(env: dict[str, str]) -> tuple[bool, str]:
     except ConnectionClosed as exc:  # server closed right after an error frame
         return False, f"connection closed (code {exc.code}): {exc.reason or 'no reason given'}"
     except Exception as exc:  # noqa: BLE001 - the wizard only reports it
-        return False, f"{type(exc).__name__}: {exc}"
+        detail = f"{type(exc).__name__}: {exc}"
+        if "403" in detail and client.requested_transport in {"auto", "http"}:
+            ok, fallback_detail = await _validate_http(client)
+            if ok:
+                return True, fallback_detail
+            return False, f"{detail} — {fallback_detail}"
+        return False, detail
+
+
+async def _validate_http(client: "GatewayClient") -> tuple[bool, str]:
+    """Enrol over HTTPS long-poll (used when a proxy refuses the WebSocket)."""
+    try:
+        data = await client._http_call(
+            "send", {"agentId": client.config.agent_id, "message": client.hello_payload()}, timeout=20
+        )
+    except Exception as exc:  # noqa: BLE001 - reported to the operator
+        return False, f"HTTPS fallback also failed: {type(exc).__name__}: {exc}"
+    for message in data.get("messages") or []:
+        if message.get("type") == "welcome":
+            return True, f"enrolled as {message.get('agentId')} (HTTPS long-poll; WebSocket refused)"
+        if message.get("type") == "error":
+            return False, str(message.get("message") or "gateway error over HTTPS")
+    return False, "HTTPS fallback: gateway answered without a welcome"
 
 
 def _step(number: int, total: int, title: str) -> None:
@@ -1610,6 +1736,7 @@ Dry-run: generate the diff but never apply it (useful for a first try).
         "DEVAGENT_STATE_DIR": existing.get("DEVAGENT_STATE_DIR", str(Path.home() / ".devagent")),
         "DEVAGENT_HEARTBEAT_SECONDS": existing.get("DEVAGENT_HEARTBEAT_SECONDS", "10"),
         "DEVAGENT_BROWSER_HEADERS": "true",
+        "DEVAGENT_TRANSPORT": existing.get("DEVAGENT_TRANSPORT", "auto"),
         "DEVAGENT_LLM_BASE_URL": llm_url,
         "DEVAGENT_LLM_TOKEN": llm_token,
         "DEVAGENT_MODEL": existing.get("DEVAGENT_MODEL", "DeepSeek-Coder-V2.5"),
@@ -1640,6 +1767,7 @@ Dry-run: generate the diff but never apply it (useful for a first try).
     print(f"  test cmd    : {test_command or 'auto-detect'}")
     print(f"  push/PR     : {'yes' if push else 'no'}{' / gh' if create_pr else ''}")
     print(f"  dry-run     : {'yes' if dry_run else 'no'}")
+    print(f"  transport   : {values['DEVAGENT_TRANSPORT']} (ws, then HTTPS long-poll)")
     print(f"  saved to    : {env_path} (mode 600)")
 
     print("\nChecking the gateway handshake…")
@@ -1716,6 +1844,7 @@ async def amain(args: argparse.Namespace) -> int:
         print(f"  agent id     : {config.agent_id}")
         print(f"  workspaces   : {', '.join(config.workspaces)}")
         print(f"  state dir    : {config.state_dir}")
+        print(f"  transport    : {config.transport} (auto = ws, then HTTPS long-poll)")
         print(f"  llm endpoint : {config.llm_base_url or '(not configured: manual plan mode)'}")
         print(f"  git          : {which('git') or 'MISSING'}")
         print(f"  gh           : {which('gh') or '(not installed, PRs disabled)'}")

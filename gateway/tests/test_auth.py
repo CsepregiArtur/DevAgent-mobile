@@ -172,6 +172,82 @@ def test_agent_websocket_explains_an_unknown_key(client: TestClient) -> None:
         assert payload["code"] == "invalid_credentials"
 
 
+# ----------------------------------------------------------------------
+# HTTPS long-poll transport (fallback when a proxy refuses the WebSocket)
+# ----------------------------------------------------------------------
+def _agent_headers(client: TestClient, name: str = "mbp-http") -> tuple[dict, str]:
+    created = client.post("/mobile/api/tokens", json={"name": name, "kind": "agent"}, headers=AUTH)
+    secret = created.json()["token"]
+    return {"Authorization": f"Bearer {secret}"}, secret
+
+
+def _hello(client: TestClient, headers: dict, agent_id: str) -> dict:
+    response = client.post(
+        "/mobile/api/agent/send",
+        json={
+            "agentId": agent_id,
+            "message": {
+                "type": "hello",
+                "hostname": agent_id,
+                "workspace": "/tmp",
+                "capabilities": ["git", "checkpoint"],
+            },
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_http_transport_enrols_with_a_welcome(client: TestClient) -> None:
+    headers, _ = _agent_headers(client)
+    data = _hello(client, headers, "mbp-http")
+    assert [m["type"] for m in data["messages"]] == ["welcome"]
+    assert data["messages"][0]["agentId"] == "mbp-http"
+
+    idle = client.post(
+        "/mobile/api/agent/poll", json={"agentId": "mbp-http", "wait": 0}, headers=headers
+    )
+    assert idle.status_code == 200
+    assert idle.json()["messages"] == []
+    assert client.get("/mobile/api/agents", headers=AUTH).json()["agents"][0]["online"] is True
+
+
+def test_http_transport_receives_the_task_assignment(client: TestClient) -> None:
+    headers, _ = _agent_headers(client, "mbp-http-2")
+    _hello(client, headers, "mbp-http-2")
+    task = create_task(client, agentId="mbp-http-2")
+
+    polled = client.post(
+        "/mobile/api/agent/poll", json={"agentId": "mbp-http-2", "wait": 2}, headers=headers
+    )
+    assert polled.status_code == 200
+    assignments = [m for m in polled.json()["messages"] if m["type"] == "task_assign"]
+    assert assignments and assignments[0]["task"]["id"] == task["id"]
+
+
+def test_http_transport_reports_acks_and_rejects_a_live_websocket(client: TestClient) -> None:
+    headers, _ = _agent_headers(client, "mbp-http-3")
+    _hello(client, headers, "mbp-http-3")
+    pong = client.post(
+        "/mobile/api/agent/send",
+        json={"agentId": "mbp-http-3", "message": {"type": "ping"}},
+        headers=headers,
+    )
+    assert [m["type"] for m in pong.json()["messages"]] == ["pong"]
+
+    # a socket already owns that agent id -> the poll is refused instead of hijacking it
+    with client.websocket_connect(
+        f"/mobile/agent/ws?token={TOKEN}&agentId=mbp-http-3"
+    ) as websocket:
+        websocket.send_json({"type": "hello", "hostname": "mbp", "capabilities": []})
+        assert websocket.receive_json()["type"] == "welcome"
+        conflict = client.post(
+            "/mobile/api/agent/poll", json={"agentId": "mbp-http-3", "wait": 0}, headers=headers
+        )
+        assert conflict.status_code == 409
+
+
 def test_bootstrap_tokens_cannot_be_revoked_from_the_api(client: TestClient) -> None:
     response = client.post("/mobile/api/tokens/bootstrap/revoke", headers=AUTH)
     assert response.status_code == 409

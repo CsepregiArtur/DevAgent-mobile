@@ -22,12 +22,13 @@ idempotency keys (``idempotencyKey`` on checkpoints/events).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from .auth import resolve_token
 from .config import Settings
@@ -139,6 +140,125 @@ def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) 
                 # "offline" (and interrupts the active task) after the timeout.
                 await service.db.set_agent_status(resolved_id, "reconnecting")
                 await service.publish_agent_status()
+
+    # ------------------------------------------------------------------
+    # HTTPS long-poll fallback
+    #
+    # Some networks (bot protection, corporate proxies) answer 403 to a
+    # WebSocket upgrade but happily proxy plain HTTPS. The same protocol is
+    # tunnelled over POST: agent -> gateway via /agent/send, gateway -> agent
+    # via /agent/poll. Both are mounted under /mobile and /mobile/api.
+    # ------------------------------------------------------------------
+    async def _http_connection(agent_id: str) -> AgentConnection:
+        connection = hub.get(agent_id)
+        if connection is None:
+            connection = AgentConnection(
+                agent_id=agent_id, transport="http", queue=asyncio.Queue()
+            )
+            await hub.register(connection)
+            logger.info("agent %s registered over https long-poll", agent_id)
+        elif connection.transport != "http":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "This agent is connected over websocket",
+                    "transport": connection.transport,
+                },
+            )
+        return connection
+
+    def _agent_id(payload: dict[str, Any], request: Request) -> str:
+        agent_id = str(payload.get("agentId") or "").strip()
+        if not agent_id:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "Provide 'agentId' (it must match DEVAGENT_AGENT_ID)"},
+            )
+        return agent_id
+
+    async def _drain(connection: AgentConnection) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        queue = connection.queue
+        if queue is None:
+            return messages
+        while True:
+            try:
+                messages.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return messages
+
+    @router.post("/agent/poll")
+    async def agent_poll(
+        request: Request, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """Long-poll: hold the request until there is something for the agent."""
+        agent_id = _agent_id(payload, request)
+        try:
+            wait = max(0.0, min(float(payload.get("wait") or 0), 50.0))
+        except (TypeError, ValueError):
+            wait = 0.0
+        connection = await _http_connection(agent_id)
+        hub.mark_seen(agent_id)
+
+        messages = await _drain(connection)
+        if not messages and wait > 0 and not connection.closed:
+            queue = connection.queue
+            if queue is not None:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    messages.append(await asyncio.wait_for(queue.get(), timeout=wait))
+                messages.extend(await _drain(connection))
+
+        if connection.closed and not messages:
+            return {
+                "transport": "http",
+                "replaced": True,
+                "messages": [],
+                "serverTime": utcnow(),
+            }
+        return {
+            "transport": "http",
+            "agentId": agent_id,
+            "messages": messages,
+            "serverTime": utcnow(),
+        }
+
+    @router.post("/agent/send")
+    async def agent_send(
+        request: Request, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """Feed agent -> gateway messages; returns the acknowledgements (if any)."""
+        agent_id = _agent_id(payload, request)
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            raise HTTPException(
+                status_code=400, detail={"error": "Expected 'message' to be a JSON object"}
+            )
+        connection = await _http_connection(agent_id)
+        hub.mark_seen(agent_id)
+        await _dispatch(service, hub, settings, connection, message)
+        acks = await _drain(connection)
+        return {
+            "transport": "http",
+            "agentId": agent_id,
+            "messages": acks,
+            "serverTime": utcnow(),
+        }
+
+    @router.post("/agent/disconnect")
+    async def agent_disconnect(
+        request: Request, payload: dict[str, Any] = Body(default={})
+    ) -> dict[str, Any]:
+        """Graceful shutdown: drop the long-poll channel."""
+        agent_id = _agent_id(payload, request)
+        connection = hub.get(agent_id)
+        removed = False
+        if connection is not None and connection.transport == "http":
+            await connection.stop()
+            removed = await hub.remove_connection(connection)
+        if removed:
+            await service.db.set_agent_status(agent_id, "reconnecting")
+            await service.publish_agent_status()
+        return {"ok": True, "removed": removed, "serverTime": utcnow()}
 
     return router
 
