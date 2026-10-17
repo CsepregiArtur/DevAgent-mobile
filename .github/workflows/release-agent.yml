@@ -30,7 +30,7 @@ jobs:
         include:
           - os: macos-14            # Apple Silicon
             asset: devagent-agent-macos-arm64
-          - os: macos-13            # Intel (retired on some accounts -> optional)
+          - os: macos-15-intel      # Intel (optional: label may be unavailable)
             asset: devagent-agent-macos-x64
             optional: true
           - os: windows-latest
@@ -52,7 +52,7 @@ jobs:
       - name: Rename (POSIX)
         if: runner.os != 'Windows'
         run: |
-          mv dist/devagent-agent "${{ matrix.asset }}"
+          mv agent/dist/devagent-agent "${{ matrix.asset }}"
           chmod +x "${{ matrix.asset }}"
           shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
           "$PWD/${{ matrix.asset }}" --version
@@ -61,7 +61,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Move-Item dist/devagent-agent.exe "${{ matrix.asset }}"
+          Move-Item agent/dist/devagent-agent.exe "${{ matrix.asset }}"
           (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.asset }}" | Out-File "${{ matrix.asset }}.sha256" -Encoding ascii
           .\${{ matrix.asset }} --version
 

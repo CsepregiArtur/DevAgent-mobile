@@ -39,6 +39,7 @@ const EMPTY_FLEET: FleetStatus = {
 
 export default function App() {
   const [sessionToken, setSessionTokenState] = useState<string>(getGatewayToken());
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [canManageTokens, setCanManageTokens] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -69,6 +70,19 @@ export default function App() {
         return null;
       });
       if (me) setCanManageTokens(me.canManageTokens);
+
+      // Agent-scoped keys can run a worker, but not drive the app.
+      if (me && !me.canUseTasks) {
+        clearSession();
+        setSessionTokenState('');
+        setAuthNotice(
+          `The token you entered is a '${me.auth.kind}' key (scopes: ${me.auth.scopes.join(
+            ', '
+          )}). Sign in with a 'pwa' or 'admin' key — generate one in Settings → API keys, ` +
+            'or use the bootstrap DEVAGENT_TOKEN.'
+        );
+        return;
+      }
 
       const [agentRes, tasksRes, diagRes, wsRes] = await Promise.all([
         fetchAgentStatus().catch(() => EMPTY_FLEET),
@@ -218,7 +232,9 @@ export default function App() {
   if (!sessionToken) {
     return (
       <LoginScreen
+        notice={authNotice}
         onAuthenticated={() => {
+          setAuthNotice(null);
           setSessionTokenState(getGatewayToken());
           loadAllData();
         }}

@@ -25,6 +25,8 @@ import {
 
 interface LoginScreenProps {
   onAuthenticated: () => void;
+  /** shown when a previous session used the wrong kind of token */
+  notice?: string | null;
 }
 
 /**
@@ -32,7 +34,7 @@ interface LoginScreenProps {
  * or with the admin password (if configured on the gateway). The gateway URL is
  * editable for the native iOS shell and for self-hosted installations.
  */
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated, notice }) => {
   const [mode, setMode] = useState<'token' | 'password'>('token');
   const [token, setToken] = useState(getGatewayToken());
   const [password, setPassword] = useState('');
@@ -115,6 +117,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
       </header>
 
       <main className="flex-1 w-full max-w-md mx-auto px-5 pb-10">
+        {notice && (
+          <div className="mb-3 p-3 rounded-xl bg-amber-950/40 border border-amber-500/30 text-[11px] text-amber-200 flex items-start gap-2 leading-relaxed">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+            <span>{notice}</span>
+          </div>
+        )}
         <form
           onSubmit={handleSubmit}
           className="p-5 rounded-2xl bg-zinc-900 border border-zinc-800 shadow-sm space-y-4"
