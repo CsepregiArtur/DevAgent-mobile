@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.1.3"
+CLIENT_VERSION = "v1.1.4"
 
 
 # ----------------------------------------------------------------------
@@ -938,16 +938,33 @@ class TaskRunner:
         if self._current_task is not None and not self._current_task.done():
             LOG.warning("busy with %s, ignoring %s (%s)", self.active_task_id, task_id, action)
             return
+        self.active_task_id = task_id
         self._current_task = asyncio.create_task(self._run_task(message, action))
         self._current_task.add_done_callback(self._task_done)
 
     def _task_done(self, finished: asyncio.Task[None]) -> None:
+        task_id = self.active_task_id
+        error: BaseException | None = None
         with contextlib.suppress(asyncio.CancelledError):
             error = finished.exception()
-            if error is not None:
-                LOG.error("task execution crashed: %s", error)
+        if error is not None:
+            # Errors raised before/around the task's own handlers (workspace not
+            # allowed, worktree creation, ...) must still close the task: without
+            # this the gateway keeps it `running` forever.
+            LOG.error("task execution crashed: %s", error)
+            if task_id and self.client is not None:
+                asyncio.get_event_loop().create_task(self._report_crash(task_id, error))
         self._current_task = None
         self.active_task_id = None
+
+    async def _report_crash(self, task_id: str, error: BaseException) -> None:
+        message = f"Agent error: {error}"
+        with contextlib.suppress(Exception):
+            await self.client.event(
+                task_id, message, event_type="error", details={"error": str(error)}
+            )
+        with contextlib.suppress(Exception):
+            await self.client.result(task_id, "failed", error=message)
 
     def on_disconnect(self) -> None:
         """The socket dropped: abort the in-flight task locally, it will be resumed."""
@@ -1045,7 +1062,9 @@ class TaskRunner:
             if candidate == root or root in candidate.parents:
                 return candidate
         raise RuntimeError(
-            f"workspace {candidate} is outside the allowed roots {[str(r) for r in allowed]}"
+            f"workspace {candidate} is outside the allowed roots {[str(r) for r in allowed]}.\n"
+            "      Fix DEVAGENT_WORKSPACES in the agent env file (or create the task with a"
+            " path inside one of those roots) and restart the agent."
         )
 
     async def _prepare_context(
