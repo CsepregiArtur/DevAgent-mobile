@@ -34,6 +34,7 @@ from .auth import resolve_token
 from .config import Settings
 from .db import utcnow
 from .hub import CLOSE_UNAUTHORIZED, AgentConnection, AgentHub
+from .runtime import STOPPING
 from .service import ServiceError, TaskService
 
 logger = logging.getLogger("devagent.agentapi")
@@ -224,8 +225,18 @@ def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) 
         if not messages and wait > 0 and not connection.closed:
             queue = connection.queue
             if queue is not None:
-                with contextlib.suppress(asyncio.TimeoutError):
-                    messages.append(await asyncio.wait_for(queue.get(), timeout=wait))
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + wait
+                while not messages and not connection.closed and not STOPPING.is_set():
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        messages.append(
+                            await asyncio.wait_for(queue.get(), timeout=min(1.0, remaining))
+                        )
+                    except asyncio.TimeoutError:
+                        continue
                 messages.extend(await _drain(connection))
 
         if connection.closed and not messages:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,7 @@ from .config import Settings
 from .db import Database, utcnow
 from .events import EventBus
 from .hub import AgentHub
+from .runtime import STOPPING
 from .scheduler import Scheduler
 from .service import TaskService
 
@@ -107,6 +111,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # stays "online" and no task stays "running" without a worker.
         await service.reconcile_on_startup()
         await scheduler.start()
+
+        # Uvicorn waits for open connections *before* running this lifespan
+        # shutdown, so SSE/WebSocket clients must be told to leave as soon as the
+        # signal arrives; otherwise systemd SIGKILLs the process and the tunnel
+        # answers 502 for the whole stop window.
+        loop = asyncio.get_running_loop()
+        previous_handlers: dict[int, Any] = {}
+
+        def _on_signal(signum: int, frame: Any) -> None:
+            STOPPING.set()
+            with contextlib.suppress(RuntimeError):
+                loop.create_task(hub.close_all())
+            previous = previous_handlers.get(signum)
+            if callable(previous):
+                previous(signum, frame)
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[sig] = signal.getsignal(sig)
+            with contextlib.suppress(ValueError):  # not in the main thread
+                signal.signal(sig, _on_signal)
+
         logger.info(
             "devagent gateway %s ready (root=%s, bus=%s, db=%s)",
             __version__,
@@ -117,6 +142,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # Tell long-lived responses (SSE, agent long-poll) to finish first.
+            STOPPING.set()
             await scheduler.stop()
             await hub.close_all()
             await bus.close()

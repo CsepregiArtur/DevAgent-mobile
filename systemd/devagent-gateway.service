@@ -11,9 +11,13 @@ Group=devagent
 WorkingDirectory=/opt/deepseek-proxy/devagent/gateway
 EnvironmentFile=/etc/deepseek-devagent.env
 ExecStart=/opt/deepseek-proxy/devagent/gateway/.venv/bin/uvicorn app.server:create_app \
-    --factory --host 127.0.0.1 --port 8082 --no-access-log
+    --factory --host 127.0.0.1 --port 8082 --no-access-log --timeout-graceful-shutdown 2
 Restart=on-failure
-RestartSec=3
+RestartSec=1
+# Graceful shutdown: SSE streams and the agent long-poll exit on SIGINT, but a
+# stuck one must never hold a deploy hostage (the tunnel answers 502 meanwhile).
+KillSignal=SIGINT
+TimeoutStopSec=10
 StateDirectory=devagent
 # Hardening
 NoNewPrivileges=true

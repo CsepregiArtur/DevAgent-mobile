@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -24,6 +25,7 @@ from .models import (
     HeartbeatPayload,
     normalize_status,
 )
+from .runtime import STOPPING
 from .service import ServiceError, TaskService
 
 logger = logging.getLogger("devagent.api")
@@ -271,12 +273,17 @@ async def _task_event_stream(
         async for chunk in _replay_task(service, task_id, after_seq):
             yield chunk
 
+    last_keepalive = time.monotonic()
     async with service.bus.subscribe() as queue:
-        while True:
+        while not STOPPING.is_set():
             try:
-                payload = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)
+                # Short slices so a restart is noticed immediately (shutdown must
+                # not wait for the full keep-alive interval).
+                payload = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
+                if time.monotonic() - last_keepalive >= KEEPALIVE_SECONDS:
+                    last_keepalive = time.monotonic()
+                    yield ": keep-alive\n\n"
                 continue
             if payload.get("type") != "event":
                 continue
@@ -303,12 +310,17 @@ async def _global_event_stream(service: TaskService, after_seq: int) -> AsyncIte
     snapshot = await service.agent_status_snapshot()
     yield f"event: agent_status\ndata: {json.dumps({'agentInfo': snapshot['info'], 'status': snapshot['status']})}\n\n"
 
+    last_keepalive = time.monotonic()
     async with service.bus.subscribe() as queue:
-        while True:
+        while not STOPPING.is_set():
             try:
-                payload = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)
+                # Short slices so a restart is noticed immediately (shutdown must
+                # not wait for the full keep-alive interval).
+                payload = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
+                if time.monotonic() - last_keepalive >= KEEPALIVE_SECONDS:
+                    last_keepalive = time.monotonic()
+                    yield ": keep-alive\n\n"
                 continue
             kind = payload.get("type")
             if kind == "agent_status":
