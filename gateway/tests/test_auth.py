@@ -248,6 +248,21 @@ def test_http_transport_reports_acks_and_rejects_a_live_websocket(client: TestCl
         assert conflict.status_code == 409
 
 
+def test_http_transport_rejects_an_app_key(client: TestClient) -> None:
+    """The control channel is agent-only, over HTTPS too (not just over the socket)."""
+    created = client.post("/mobile/api/tokens", json={"name": "phone", "kind": "pwa"}, headers=AUTH)
+    headers = {"Authorization": f"Bearer {created.json()['token']}"}
+    response = client.post(
+        "/mobile/api/agent/send",
+        json={"agentId": "mbp", "message": {"type": "hello", "hostname": "mbp", "capabilities": []}},
+        headers=headers,
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "wrong_token_kind"
+    # the read-only fleet view stays available to the app
+    assert client.get("/mobile/api/agent/status", headers=headers).status_code == 200
+
+
 def test_bootstrap_tokens_cannot_be_revoked_from_the_api(client: TestClient) -> None:
     response = client.post("/mobile/api/tokens/bootstrap/revoke", headers=AUTH)
     assert response.status_code == 409

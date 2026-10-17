@@ -168,6 +168,26 @@ def build_agent_router(service: TaskService, hub: AgentHub, settings: Settings) 
         return connection
 
     def _agent_id(payload: dict[str, Any], request: Request) -> str:
+        """Validate ``agentId`` **and** that the caller may act as an agent.
+
+        The HTTP middleware only enforces "some scope that may touch /api/agent",
+        which includes ``pwa`` (the app calls /api/agent/status). The control
+        channel itself must stay agent-only, exactly like the WebSocket.
+        """
+        auth = getattr(request.state, "auth", None)
+        if auth is not None and not (auth.has("agent") or auth.has("admin")):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": (
+                        f"That key is of kind '{auth.kind}', but the agent channel needs kind "
+                        "'agent'. Create one in the app: Settings → API keys → kind 'agent'."
+                    ),
+                    "code": "wrong_token_kind",
+                    "kind": auth.kind,
+                    "granted": list(auth.scopes),
+                },
+            )
         agent_id = str(payload.get("agentId") or "").strip()
         if not agent_id:
             raise HTTPException(
