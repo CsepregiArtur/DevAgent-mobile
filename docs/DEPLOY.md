@@ -358,8 +358,16 @@ Tokenurile din environment (`DEVAGENT_TOKEN`, `DEVAGENT_AGENT_TOKEN`) rămân va
 cd /opt/deepseek-proxy/devagent/gateway
 .venv/bin/python -m app.cli token --name iPhone-Artur --kind pwa
 .venv/bin/python -m app.cli tokens
-.venv/bin/python -m app.cli hash-password      # activează login-ul cu parolă
+
+# login cu parolă (scrie hash-ul scrypt în env, apoi repornește serviciul)
+printf '%s\n' 'parola-ta-lunga' | .venv/bin/python -m app.cli hash-password --stdin
+systemctl restart devagent-gateway
+curl -s http://127.0.0.1:8082/mobile/api/auth/config   # passwordLogin: true
 ```
+
+Fără hash configurat, ecranul de login arată doar câmpul de token (butonul
+**Password** este dezactivat). O cheie `admin` generată din Settings are aceleași
+drepturi ca sesiunea de parolă, dar nu expiră.
 
 ### 5.5 Provideri AI (auto sau manual, per sarcină)
 
