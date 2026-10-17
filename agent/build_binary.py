@@ -54,6 +54,24 @@ def main(argv: list[str] | None = None) -> int:
         "websockets",
         str(ENTRY),
     ]
+
+    # A frozen interpreter has no CA store, so `wss://` fails with
+    # CERTIFICATE_VERIFY_FAILED on a clean machine. Ship certifi's bundle.
+    try:
+        import certifi  # noqa: F401
+    except ImportError:
+        print(
+            "WARNING: certifi is missing — the binary will fall back to the OS bundle\n"
+            "         (macOS /etc/ssl/cert.pem). Install it with: python -m pip install certifi",
+            file=sys.stderr,
+        )
+    else:
+        command[command.index(str(ENTRY)):command.index(str(ENTRY))] = [
+            "--collect-data",
+            "certifi",
+            "--hidden-import",
+            "certifi",
+        ]
     print(" ".join(command))
     subprocess.run(command, check=True, cwd=ROOT)
 

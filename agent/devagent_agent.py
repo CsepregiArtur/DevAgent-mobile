@@ -62,7 +62,70 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.0.1"
+CLIENT_VERSION = "v1.0.2"
+
+
+# ----------------------------------------------------------------------
+# TLS trust store (the one-file binary ships no CA bundle of its own)
+# ----------------------------------------------------------------------
+def _ca_bundle_candidates() -> list[Path]:
+    """Places a CA bundle may live, most specific first."""
+    candidates: list[Path] = []
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:  # PyInstaller one-file extraction directory
+        candidates.append(Path(bundled) / "cacert.pem")
+        candidates.append(Path(bundled) / "certifi" / "cacert.pem")
+    here = Path(sys.executable).resolve().parent
+    candidates.append(here / "cacert.pem")
+    try:  # pip-installed certifi (not present in the binary unless collected)
+        import certifi
+
+        candidates.append(Path(certifi.where()))
+    except Exception:  # pragma: no cover - optional dependency
+        pass
+    if platform.system() == "Darwin":
+        candidates.extend(
+            [
+                Path("/etc/ssl/cert.pem"),
+                Path("/usr/local/etc/openssl/cert.pem"),
+                Path("/opt/homebrew/etc/openssl@3/cert.pem"),
+            ]
+        )
+    elif platform.system() == "Windows":
+        candidates.append(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/mingw64/ssl/certs/ca-bundle.crt")
+    else:
+        candidates.extend(
+            [
+                Path("/etc/ssl/certs/ca-certificates.crt"),
+                Path("/etc/pki/tls/certs/ca-bundle.crt"),
+                Path("/etc/ssl/cert.pem"),
+            ]
+        )
+    return candidates
+
+
+def _ensure_ca_bundle() -> str | None:
+    """Point Python at a usable CA bundle (no-op when one is already configured)."""
+    current = os.environ.get("SSL_CERT_FILE")
+    if current and Path(current).exists():
+        return current
+    for candidate in _ca_bundle_candidates():
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 1024:
+                os.environ["SSL_CERT_FILE"] = str(candidate)
+                LOG.debug("using CA bundle %s", candidate)
+                return str(candidate)
+        except OSError:  # pragma: no cover - permissions
+            continue
+    LOG.debug("no CA bundle found; TLS verification may fail")
+    return None
+
+
+def _launch_command(env_path: Path) -> str:
+    """Command line that starts this agent again (binary vs. script)."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --env-file "{env_path}"'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"'
 
 
 # ----------------------------------------------------------------------
@@ -1547,14 +1610,15 @@ Dry-run: generate the diff but never apply it (useful for a first try).
     ok, detail = await _validate_connection(values)
     if ok:
         print(f"✅ Connection OK — {detail}")
+        launch = _launch_command(env_path)
         print("\nNext steps")
         print("  1) keep it running in the foreground to watch it:")
-        print(f'       "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}" --verbose')
+        print(f"       {launch} --verbose")
         print("     run it at login:")
         print("       macOS   → launchd (agent/com.devagent.agent.plist)")
         print("       Linux   → systemd unit (see docs/DEPLOY.md)")
         print("       Windows → Task Scheduler at logon, action:")
-        print(f'       "{sys.executable}" "{Path(__file__).resolve()}" --env-file "{env_path}"')
+        print(f"       {launch}")
         print("  2) open the app → Dashboard: this machine appears in the fleet within ~2s")
         print("  3) New Task → 'Run on' → pick this machine (or leave it on any idle agent)")
         return 0
@@ -1566,8 +1630,13 @@ Dry-run: generate the diff but never apply it (useful for a first try).
         print("    401 = the key is wrong, revoked, or of the wrong kind (must be `agent`).")
     elif "getaddrinfo" in detail or "Name or service" in detail:
         print("    DNS: check the gateway URL (typo? offline?).")
+    elif "CERTIFICATE_VERIFY_FAILED" in detail or "SSLCertVerification" in detail:
+        print("    TLS: no CA bundle was found on this machine.")
+        print("      macOS:  SSL_CERT_FILE=/etc/ssl/cert.pem " + f'"{sys.executable}" --setup --env-file "{env_path}"')
+        print("      or install the bundle:  brew install ca-certificates")
+        print("      (builds from v1.0.2 onward ship their own CA bundle)")
     print("    Your answers were saved, so you can fix one value and re-run:")
-    print(f'      "{sys.executable}" "{Path(__file__).resolve()}" --setup --env-file "{env_path}"')
+    print(f'      "{sys.executable}" --setup --env-file "{env_path}"' if getattr(sys, "frozen", False) else f'      "{sys.executable}" "{Path(__file__).resolve()}" --setup --env-file "{env_path}"')
     return 1
 
 
@@ -1642,6 +1711,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _ensure_ca_bundle()
     try:
         return asyncio.run(amain(args))
     except KeyboardInterrupt:  # pragma: no cover - interactive
