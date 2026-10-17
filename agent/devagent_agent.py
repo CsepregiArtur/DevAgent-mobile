@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover - guided error
     raise SystemExit(2)
 
 LOG = logging.getLogger("devagent.agent")
-CLIENT_VERSION = "v1.0.3"
+CLIENT_VERSION = "v1.0.4"
 
 
 # ----------------------------------------------------------------------
@@ -1394,6 +1394,36 @@ def _ask_bool(prompt: str, default: bool = False) -> bool:
     return raw in {"y", "yes", "1", "true", "da"}
 
 
+def _http_probe(ws_url: str) -> str:
+    """One plain HTTPS request to the same host, to see *who* answered."""
+    parsed = urllib.parse.urlparse(ws_url)
+    scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
+    target = urllib.parse.urlunparse((scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+    headers = {
+        "User-Agent": f"DevAgent-Agent/{CLIENT_VERSION} ({platform.system()} {platform.release()})",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    request = urllib.request.Request(target, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - known URL
+            return f"HTTP {response.status} from server={response.headers.get('server', '?')}"
+    except urllib.error.HTTPError as exc:
+        bits = [f"HTTP {exc.code}", f"server={exc.headers.get('server', '?')}"]
+        for header in ("cf-ray", "cf-mitigated", "cf-cache-status"):
+            value = exc.headers.get(header)
+            if value:
+                bits.append(f"{header}={value}")
+        body = ""
+        with contextlib.suppress(Exception):
+            body = exc.read(240).decode("utf-8", "replace").replace("\n", " ").strip()
+        if body:
+            bits.append(f"body={body[:180]}")
+        return " · ".join(bits)
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        return f"probe failed: {type(exc).__name__}: {exc}"
+
+
 async def _validate_connection(env: dict[str, str]) -> tuple[bool, str]:
     """Handshake check used by the wizard (browser-like headers included)."""
     config = Config.from_env(env)
@@ -1634,8 +1664,16 @@ Dry-run: generate the diff but never apply it (useful for a first try).
         print("    This key belongs to the app (kind 'pwa'), not to an agent.")
         print("    Create a separate key: Settings → API keys → kind 'agent' → Generate.")
     elif "403" in detail:
-        print("    403 = the gateway refused the key: wrong kind (must be 'agent'), revoked or")
-        print("    expired — or a proxy/CDN in front of the gateway blocked the WebSocket.")
+        print("    The handshake was refused before reaching the agent handler. Checking who answered…")
+        probe = _http_probe(values.get("DEVAGENT_GATEWAY_URL", ""))
+        print(f"    {probe}")
+        if "server=cloudflare" in probe:
+            print("    → Cloudflare (not the gateway) rejected it. In the dashboard for this zone:")
+            print("       Security → Bots → Bot Fight Mode: Off   (it cannot be skipped by WAF rules)")
+            print("       or Security → Settings → Browser Integrity Check: Off")
+            print("       then retry the handshake (the values are already saved).")
+        else:
+            print("    → The gateway answered: check the key kind/state, then retry.")
     elif "401" in detail:
         print("    401 = the key is wrong, revoked, or of the wrong kind (must be `agent`).")
     elif "getaddrinfo" in detail or "Name or service" in detail:
